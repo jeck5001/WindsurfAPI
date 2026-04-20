@@ -1791,7 +1791,21 @@ const App = {
     apply.disabled = true;
     status.innerHTML = '<span class="text-muted">正在拉取 + 重启...</span>';
     try {
-      const r = await this.api('POST', '/self-update');
+      let r = await this.api('POST', '/self-update');
+      if (r.dirty) {
+        const filesList = (r.dirtyFiles || []).slice(0, 10).map(f => this.esc(f)).join('<br>');
+        const force = await this.confirm(
+          '工作区有本地修改',
+          `以下文件已被修改但未提交：<br><br><code style="display:block;padding:8px;background:var(--surface-2);font-size:11px;max-height:150px;overflow:auto">${filesList}</code><br>继续将用远程版本覆盖这些修改。非 git 部署（SFTP / 压缩包）请点强制覆盖。`,
+          { okText: '强制覆盖并更新', danger: true, html: true }
+        );
+        if (!force) {
+          status.innerHTML = '<span class="text-muted">已取消</span>';
+          apply.disabled = false;
+          return;
+        }
+        r = await this.api('POST', '/self-update', { forceReset: true });
+      }
       if (!r.ok) throw new Error(r.error || '更新失败');
       if (r.changed) {
         status.innerHTML = `

@@ -140,7 +140,28 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   if (subpath === '/self-update' && method === 'POST') {
     try {
       const before = await gitStatus();
-      const pull = await runShell('git pull --ff-only 2>&1');
+      // Guard: working tree must be clean (ignoring untracked files like
+      // accounts.json, stats.json, runtime-config.json which live in the
+      // repo root but aren't checked in). If the tracked files were edited
+      // manually (or pushed via SFTP without a corresponding commit),
+      // `git pull --ff-only` would refuse — surface a friendly error
+      // instead of a raw git message.
+      const dirty = (await runShell('git status --porcelain -uno')).trim();
+      if (dirty) {
+        const allowForce = !!(body && body.forceReset);
+        if (!allowForce) {
+          return json(res, 200, {
+            ok: false,
+            dirty: true,
+            error: '工作区有未提交的修改（SFTP 部署或手动改过代码）。确定要覆盖本地修改用远程最新版本吗？',
+            dirtyFiles: dirty.split('\n').slice(0, 20),
+          });
+        }
+        await runShell(`git fetch origin ${before.branch || 'master'}`);
+        await runShell(`git reset --hard origin/${before.branch || 'master'}`);
+      }
+      const pullCmd = `git pull origin ${before.branch || 'master'} --ff-only 2>&1`;
+      const pull = dirty ? 'hard-reset applied' : await runShell(pullCmd);
       const after = await gitStatus();
       const changed = before.commit !== after.commit;
       // Schedule a detached restart so this response can flush before PM2 kills us.
