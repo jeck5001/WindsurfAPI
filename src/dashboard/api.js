@@ -151,7 +151,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       // manually (or pushed via SFTP without a corresponding commit),
       // `git pull --ff-only` would refuse — surface a friendly error
       // instead of a raw git message.
-      const dirty = (await runShell('git status --porcelain -uno')).trim();
+      const dirty = (await runGit(['status', '--porcelain', '-uno'])).trim();
       if (dirty) {
         const allowForce = !!(body && body.forceReset);
         if (!allowForce) {
@@ -162,16 +162,20 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
             dirtyFiles: dirty.split('\n').slice(0, 20),
           });
         }
-        // branch comes from `git rev-parse --abbrev-ref HEAD`, but belt &
-        // braces — refuse anything that isn't a plain git-ref before
-        // interpolating into a shell command.
+        // branch comes from `git rev-parse --abbrev-ref HEAD`; execFile
+        // doesn't spawn a shell so metacharacters can't break out — the
+        // regex is kept as defence-in-depth so a malformed ref can't feed
+        // a bogus `origin/xxx` spec to `git fetch`.
         const safeBranch = /^[\w.\-\/]+$/.test(before.branch || '') ? before.branch : 'master';
-        await runShell(`git fetch origin ${safeBranch}`);
-        await runShell(`git reset --hard origin/${safeBranch}`);
+        await runGit(['fetch', 'origin', safeBranch]);
+        await runGit(['reset', '--hard', `origin/${safeBranch}`]);
       }
       const safeBranch = /^[\w.\-\/]+$/.test(before.branch || '') ? before.branch : 'master';
-      const pullCmd = `git pull origin ${safeBranch} --ff-only 2>&1`;
-      const pull = dirty ? 'hard-reset applied' : await runShell(pullCmd);
+      // execFile can't do `2>&1`; use child_process stderr merge via
+      // combining stdout+stderr explicitly. runGit already pipes stderr
+      // into the Error message on failure, so for success we get just
+      // stdout, which is what the UI displays.
+      const pull = dirty ? 'hard-reset applied' : await runGit(['pull', 'origin', safeBranch, '--ff-only']);
       const after = await gitStatus();
       const changed = before.commit !== after.commit;
       // Schedule process exit so PM2 auto-restarts us. This is far simpler
@@ -569,10 +573,15 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 // HTTP CONNECT tunnel to api.ipify.org:443 → GET / → the returned IP is the
 // proxy's egress IP. Confirms the proxy works AND that auth is accepted.
 // ─── Self-update helpers ───────────────────────────────
-function runShell(cmd, opts = {}) {
+//
+// execFile (not exec) for every invocation: no shell is spawned, so
+// metacharacters in any future argument source are data, not commands.
+// Belt-and-braces with the branch-name regex in /self-update — if a
+// future refactor drops the regex, execFile still denies injection.
+function runGit(args, opts = {}) {
   return new Promise((resolve, reject) => {
-    import('node:child_process').then(({ exec }) => {
-      exec(cmd, { timeout: 30_000, maxBuffer: 1024 * 1024, ...opts }, (err, stdout, stderr) => {
+    import('node:child_process').then(({ execFile }) => {
+      execFile('git', args, { timeout: 30_000, maxBuffer: 1024 * 1024, ...opts }, (err, stdout, stderr) => {
         if (err) return reject(new Error((stderr || err.message).toString().slice(0, 500)));
         resolve(stdout.toString());
       });
@@ -581,16 +590,16 @@ function runShell(cmd, opts = {}) {
 }
 
 async function gitStatus() {
-  const commit = (await runShell('git rev-parse HEAD')).trim();
-  const branch = (await runShell('git rev-parse --abbrev-ref HEAD')).trim();
+  const commit = (await runGit(['rev-parse', 'HEAD'])).trim();
+  const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
   let remote = '';
   try {
-    await runShell('git fetch --quiet origin');
-    remote = (await runShell(`git rev-parse origin/${branch}`)).trim();
+    await runGit(['fetch', '--quiet', 'origin']);
+    remote = (await runGit(['rev-parse', `origin/${branch}`])).trim();
   } catch {}
-  const localMsg = (await runShell('git log -1 --pretty=format:%s')).trim();
+  const localMsg = (await runGit(['log', '-1', '--pretty=format:%s'])).trim();
   const behind = remote && remote !== commit;
-  const remoteMsg = behind ? (await runShell(`git log -1 --pretty=format:%s ${remote}`).catch(() => '')).trim() : '';
+  const remoteMsg = behind ? (await runGit(['log', '-1', '--pretty=format:%s', remote]).catch(() => '')).trim() : '';
   return {
     commit: commit.slice(0, 7),
     commitFull: commit,

@@ -118,6 +118,20 @@ bash install-ls.sh
 # 或者指定 URL：
 #   bash install-ls.sh --url https://example.com/language_server_linux_x64
 
+# ⚠️ 看不到 opus-4.7 / 其他新模型？
+# Exafunction/codeium 公开 release 最新停在 v2.12.5（2026-01），不含 4.7。
+# 要 4.7，把 Windsurf 桌面端本体里的 LS binary 拷过来：
+#
+#   macOS:   "$HOME/Library/Application Support/Windsurf/resources/app/extensions/windsurf/bin/language_server_macos_arm"
+#   Linux:   "$HOME/.windsurf/bin/language_server_linux_x64"
+#            或  /opt/Windsurf/resources/app/extensions/windsurf/bin/language_server_linux_x64
+#   Windows: %APPDATA%\Windsurf\bin\language_server_windows_x64.exe
+#
+#   # 从本地桌面端装：
+#   bash install-ls.sh /path/to/language_server_linux_x64
+#
+# LS binary 一换，/v1/models 立刻就能看到最新模型目录了（云端自动发现）。
+
 cat > .env << 'EOF'
 PORT=3003
 API_KEY=

@@ -114,6 +114,21 @@ mkdir -p /opt/windsurf/data/db
 cp language_server_linux_x64 /opt/windsurf/
 chmod +x /opt/windsurf/language_server_linux_x64
 
+# ⚠️ Can't see opus-4.7 / other new models?
+# The public Exafunction/codeium release is stuck at v2.12.5 (Jan 2026)
+# and does not ship 4.7. To get 4.7, copy the LS binary out of the
+# Windsurf desktop app bundle:
+#
+#   macOS:   "$HOME/Library/Application Support/Windsurf/resources/app/extensions/windsurf/bin/language_server_macos_arm"
+#   Linux:   "$HOME/.windsurf/bin/language_server_linux_x64"
+#            or /opt/Windsurf/resources/app/extensions/windsurf/bin/language_server_linux_x64
+#   Windows: %APPDATA%\Windsurf\bin\language_server_windows_x64.exe
+#
+# Then install it via the one-click script:
+#   bash install-ls.sh /path/to/language_server_linux_x64
+#
+# Once swapped, /v1/models will auto-discover the newer catalog from the cloud.
+
 cat > .env << 'EOF'
 PORT=3003
 API_KEY=
