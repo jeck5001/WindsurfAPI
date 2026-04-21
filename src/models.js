@@ -133,10 +133,10 @@ export const MODELS = {
 
   // ── Qwen ────────────────────────────────────────────────
   'qwen-3':                         { name: 'qwen-3',                         provider: 'alibaba', enumValue: 324, credit: 0.5 },
-  // qwen-3-coder: server rejects both enum 325 auto-UID and explicit
-  // 'qwen-3-coder-480b'. Model exists in binary but cascade backend
-  // doesn't have it registered — leaving out until upstream adds it.
-  'qwen-3-coder-fast':              { name: 'qwen-3-coder-fast',              provider: 'alibaba', enumValue: 327, modelUid: 'qwen3-coder-fast', credit: 0.5 },
+  // qwen-3-coder + qwen-3-coder-fast: exist in binary enum (325/327)
+  // but cascade server doesn't have any routing registered for them —
+  // both enum-only and explicit UIDs fail with 'model not found'.
+  // Removed from catalog until upstream registers them.
 
   // ── Kimi ────────────────────────────────────────────────
   'kimi-k2':                        { name: 'kimi-k2',                        provider: 'moonshot', enumValue: 323, modelUid: 'MODEL_KIMI_K2', credit: 0.5 },
