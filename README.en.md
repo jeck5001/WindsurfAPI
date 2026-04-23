@@ -28,20 +28,20 @@ Turns [Windsurf](https://windsurf.com) (formerly Codeium)'s AI models into **two
 ```mermaid
 flowchart LR
     subgraph Clients
-        A[OpenAI SDK<br/>curl / Frontend]
-        B[Claude Code<br/>Cline<br/>Cursor]
+        A[OpenAI SDK<br>curl / Frontend]
+        B[Claude Code<br>Cline<br>Cursor]
     end
 
     subgraph WindsurfAPI["WindsurfAPI (Node.js)"]
-        C[HTTP Service<br/>Port 3003]
-        D[Account Pool<br/>Round-Robin<br/>Rate Limit<br/>Failover]
+        C[HTTP Service<br>Port 3003]
+        D[Account Pool<br>Round-Robin<br>Rate Limit<br>Failover]
     end
 
-    E[Language Server<br/>(Windsurf binary)]
-    F[Windsurf Cloud<br/>server.self-serve.windsurf.com]
+    E[Language Server<br>(Windsurf binary)]
+    F[Windsurf Cloud<br>server.self-serve.windsurf.com]
 
-    A -->|"/v1/chat/completions"<br/>OpenAI JSON + SSE| C
-    B -->|"/v1/messages"<br/>Anthropic SSE| C
+    A -->|"/v1/chat/completions"<br>OpenAI JSON + SSE| C
+    B -->|"/v1/messages"<br>Anthropic SSE| C
     C <-->|gRPC| E
     E <-->|HTTPS| F
     D -.-> C
@@ -65,11 +65,11 @@ sequenceDiagram
     participant WC as Windsurf Cloud
 
     U->>CC: "Help me fix a bug"
-    CC->>WA: POST /v1/messages<br/>messages + tools + system
+    CC->>WA: POST /v1/messages<br>messages + tools + system
     WA->>WC: Package into Cascade request
-    WC-->>WA: Model thinks → returns<br/>tool_use(edit_file)
-    WA-->>CC: Anthropic SSE<br/>content_block=tool_use
-    CC->>CC: Execute edit_file() locally<br/>(Read/write local files)
+    WC-->>WA: Model thinks → returns<br>tool_use(edit_file)
+    WA-->>CC: Anthropic SSE<br>content_block=tool_use
+    CC->>CC: Execute edit_file() locally<br>(Read/write local files)
     CC->>WA: Send tool_result
     WA->>WC: Continue conversation...
     loop Conversation Loop
