@@ -94,6 +94,26 @@ function genId() {
   return 'chatcmpl-' + randomUUID().replace(/-/g, '').slice(0, 29);
 }
 
+const MODEL_PROVIDERS = {
+  claude: 'Anthropic', gpt: 'OpenAI', gemini: 'Google', deepseek: 'DeepSeek',
+  grok: 'xAI', qwen: 'Alibaba', kimi: 'Moonshot', glm: 'Zhipu', swe: 'Windsurf',
+  o3: 'OpenAI', o4: 'OpenAI',
+};
+
+function neutralizeCascadeIdentity(text, modelName) {
+  if (!text || !modelName) return text;
+  const provider = MODEL_PROVIDERS[Object.keys(MODEL_PROVIDERS).find(k => modelName.toLowerCase().startsWith(k)) || ''];
+  if (!provider) return text;
+  return text
+    .replace(/\bI am Cascade\b/gi, `I am ${modelName}`)
+    .replace(/\bI'm Cascade\b/gi, `I'm ${modelName}`)
+    .replace(/\bmy name is Cascade\b/gi, `my name is ${modelName}`)
+    .replace(/\bCascade, an AI coding assistant\b/gi, `${modelName}, an AI assistant`)
+    .replace(/\bCascade, made by (?:Codeium|Windsurf)\b/gi, `${modelName}, made by ${provider}`)
+    .replace(/\bdeveloped by (?:Codeium|Windsurf)\b/gi, `developed by ${provider}`)
+    .replace(/\bcreated by (?:Codeium|Windsurf)\b/gi, `created by ${provider}`);
+}
+
 // Rough token estimate (~4 chars/token). Used only to populate the
 // OpenAI-compatible `usage.prompt_tokens_details.cached_tokens` field so
 // upstream billing/dashboards (new-api) can recognise our local cache hits.
@@ -195,13 +215,34 @@ export async function handleChatCompletions(body) {
     max_tokens,
     tools,
     tool_choice,
+    response_format,
   } = body;
-  // `messages` is `let` not `const` so the identity-prompt injection below
-  // can prepend a system turn for the legacy path too.
   let messages = body.messages;
 
+  const wantJson = response_format?.type === 'json_object' || response_format?.type === 'json_schema';
+  if (wantJson) {
+    let jsonHint = '\n\n[You MUST respond with valid JSON only. No markdown code fences, no explanation text, no prefix/suffix. Your entire response must be a single parseable JSON object.';
+    if (response_format?.type === 'json_schema' && response_format?.json_schema?.schema) {
+      jsonHint += ' Conform to this JSON Schema:\n' + JSON.stringify(response_format.json_schema.schema);
+    }
+    jsonHint += ']';
+    const sysJsonMsg = { role: 'system', content: 'Respond with valid JSON only. No markdown, no code fences, no explanation. Output must be parseable by JSON.parse().' };
+    messages = [sysJsonMsg, ...messages.map((m, i) => {
+      if (i === messages.length - 1 && m.role === 'user') {
+        const content = typeof m.content === 'string' ? m.content + jsonHint : m.content;
+        return { ...m, content };
+      }
+      return m;
+    })];
+  }
+
   const modelKey = resolveModel(reqModel || config.defaultModel);
-  const modelInfo = getModelInfo(modelKey);
+  const wantThinking = !!(body.thinking?.type === 'enabled' || body.reasoning_effort);
+  let effectiveModelKey = modelKey;
+  if (wantThinking && !modelKey.includes('thinking') && getModelInfo(modelKey + '-thinking')) {
+    effectiveModelKey = modelKey + '-thinking';
+  }
+  const modelInfo = getModelInfo(effectiveModelKey) || getModelInfo(modelKey);
   const displayModel = modelInfo?.name || reqModel || config.defaultModel;
   const modelEnum = modelInfo?.enumValue || 0;
   const modelUid = modelInfo?.modelUid || null;
@@ -496,22 +537,22 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     let serverUsage = null;
 
     if (useCascade) {
-      const chunks = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, { reuseEntry: poolCtx?.reuseEntry || null, toolPreamble });
+      const chunks = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, { reuseEntry: poolCtx?.reuseEntry || null, toolPreamble, displayModel: model });
       for (const c of chunks) {
         if (c.text) allText += c.text;
         if (c.thinking) allThinking += c.thinking;
       }
-      cascadeMeta = { cascadeId: chunks.cascadeId, sessionId: chunks.sessionId };
+      cascadeMeta = {
+        cascadeId: chunks.cascadeId,
+        sessionId: chunks.sessionId,
+        stepOffset: chunks.stepOffset,
+        generatorOffset: chunks.generatorOffset,
+      };
       serverUsage = chunks.usage || null;
-      // Always strip <tool_call>/<tool_result> blocks from Cascade text.
-      // - emulateTools=true: parsed tool_calls become OpenAI-format tool_calls.
-      // - emulateTools=false: blocks are silently discarded (defense-in-depth
-      //   against Cascade's system prompt inducing tool markup even after we
-      //   override tool_calling_section).
       {
         const parsed = parseToolCallsFromText(allText);
         allText = parsed.text;
-        if (emulateTools) toolCalls = parsed.toolCalls;
+        toolCalls = parsed.toolCalls;
       }
       // Built-in Cascade tool calls (chunks.toolCalls — edit_file, view_file,
       // list_directory, run_command, etc.) are intentionally DROPPED. Their
@@ -529,6 +570,11 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     // Scrub server-internal filesystem paths from everything we're about to
     // return. See src/sanitize.js for the patterns and rationale.
     allText = sanitizeText(allText);
+    allText = neutralizeCascadeIdentity(allText, model);
+    if (wantJson && allText) {
+      const fenceMatch = allText.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      if (fenceMatch) allText = fenceMatch[1].trim();
+    }
     allThinking = sanitizeText(allThinking);
     if (toolCalls.length) {
       toolCalls = toolCalls.map(tc => sanitizeToolCall(tc));
@@ -543,6 +589,8 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
         sessionId: cascadeMeta.sessionId,
         lsPort: poolCtx.lsPort,
         apiKey: poolCtx.apiKey,
+        stepOffset: Number.isFinite(cascadeMeta.stepOffset) ? cascadeMeta.stepOffset : poolCtx.reuseEntry?.stepOffset,
+        generatorOffset: Number.isFinite(cascadeMeta.generatorOffset) ? cascadeMeta.generatorOffset : poolCtx.reuseEntry?.generatorOffset,
         createdAt: poolCtx.reuseEntry?.createdAt,
       });
     }
@@ -790,13 +838,11 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
             // silently discarded. Sanitize server-internal paths out of
             // the emulated call's input too (issue #38) — otherwise Claude
             // Code tries to Read the sandbox path and fails.
-            if (emulateTools) {
-              for (const rawTc of done) {
-                const tc = sanitizeToolCall(rawTc);
-                const idx = collectedToolCalls.length;
-                collectedToolCalls.push(tc);
-                emitToolCallDelta(tc, idx);
-              }
+            for (const rawTc of done) {
+              const tc = sanitizeToolCall(rawTc);
+              const idx = collectedToolCalls.length;
+              collectedToolCalls.push(tc);
+              emitToolCallDelta(tc, idx);
             }
           }
           if (safeText) emitContent(pathStreamText.feed(safeText));
@@ -887,7 +933,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
           try {
             if (useCascade) {
               cascadeResult = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, {
-                onChunk, signal: abortController.signal, reuseEntry, toolPreamble,
+                onChunk, signal: abortController.signal, reuseEntry, toolPreamble, displayModel: model,
               });
             } else {
               await client.rawGetChatMessage(messages, modelEnum, modelUid, { onChunk });
@@ -902,13 +948,11 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
             if (toolParser) {
               const tail = toolParser.flush();
               if (tail.text) emitContent(pathStreamText.feed(tail.text));
-              if (emulateTools) {
-                for (const rawTc of tail.toolCalls) {
-                  const tc = sanitizeToolCall(rawTc);
-                  const idx = collectedToolCalls.length;
-                  collectedToolCalls.push(tc);
-                  emitToolCallDelta(tc, idx);
-                }
+              for (const rawTc of tail.toolCalls) {
+                const tc = sanitizeToolCall(rawTc);
+                const idx = collectedToolCalls.length;
+                collectedToolCalls.push(tc);
+                emitToolCallDelta(tc, idx);
               }
             }
             emitContent(pathStreamText.flush());
@@ -921,6 +965,8 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
                 sessionId: cascadeResult.sessionId,
                 lsPort: ls.port,
                 apiKey: currentApiKey,
+                stepOffset: Number.isFinite(cascadeResult.stepOffset) ? cascadeResult.stepOffset : reuseEntry?.stepOffset,
+                generatorOffset: Number.isFinite(cascadeResult.generatorOffset) ? cascadeResult.generatorOffset : reuseEntry?.generatorOffset,
                 createdAt: reuseEntry?.createdAt,
               });
             }
