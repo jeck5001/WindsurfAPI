@@ -840,8 +840,8 @@ tbody tr:hover td { background: var(--surface-2); }
   box-shadow: 0 8px 28px rgba(0,0,0,.5);
   backdrop-filter: blur(10px);
   opacity: 0;
-  transform: translate(-50%, -100%);
-  transition: opacity .12s ease;
+  transform: translate(-50%, 0);
+  transition: opacity .12s ease, left .08s ease-out;
   z-index: 5;
   white-space: nowrap;
 }
@@ -1752,9 +1752,9 @@ window._firebaseOAuth = async function(provider) {
         </div>
         <div class="chart-controls">
           <div class="seg-group" role="tablist">
-            <button class="seg-btn stats-type-btn active" data-type="area" onclick="App.setChartType('area')" data-i18n="section.requestChart.typeArea">面积图</button>
+            <button class="seg-btn stats-type-btn" data-type="area" onclick="App.setChartType('area')" data-i18n="section.requestChart.typeArea">面积图</button>
             <button class="seg-btn stats-type-btn" data-type="line" onclick="App.setChartType('line')" data-i18n="section.requestChart.typeLine">折线图</button>
-            <button class="seg-btn stats-type-btn" data-type="bar" onclick="App.setChartType('bar')" data-i18n="section.requestChart.typeBar">柱状图</button>
+            <button class="seg-btn stats-type-btn active" data-type="bar" onclick="App.setChartType('bar')" data-i18n="section.requestChart.typeBar">柱状图</button>
             <button class="seg-btn stats-type-btn" data-type="stacked" onclick="App.setChartType('stacked')" data-i18n="section.requestChart.typeStacked">堆叠图</button>
           </div>
           <div class="seg-group" role="tablist">
@@ -3450,7 +3450,7 @@ const App = {
   // ─── Stats ───────────────────────────────────
   statsRange: 24,            // number of hours, or 'all', or 'custom'
   statsCustomRange: null,    // { start: Date, end: Date } when range='custom'
-  statsChartType: 'area',
+  statsChartType: 'bar',
   statsMetrics: { requests: true, success: true, errors: true },
   _lastStatsData: null,
   // Softer, more cohesive palette — indigo / emerald / rose
@@ -3655,20 +3655,16 @@ const App = {
   renderMainChart(d) {
     const canvas = document.getElementById('stats-canvas');
     const legend = document.getElementById('stats-legend');
-    const tipEl = document.getElementById('stats-tooltip');
     const rangeIndicator = document.getElementById('stats-range-indicator');
     if (!canvas) return;
 
     let buckets = this._filterBuckets(d.hourlyBuckets);
-    // Downsample if too many points
     const MAX_POINTS = 160;
     const originalLength = buckets.length;
     buckets = this._downsample(buckets, MAX_POINTS);
 
     const { ctx, W, H } = this._setupCanvas(canvas);
-    ctx.clearRect(0, 0, W, H);
 
-    // Range indicator text (top-right badge above the chart)
     if (rangeIndicator) {
       const rangeText = this._rangeLabel(originalLength, buckets.length);
       rangeIndicator.textContent = rangeText;
@@ -3676,12 +3672,15 @@ const App = {
     }
 
     if (buckets.length < 1) {
+      ctx.clearRect(0, 0, W, H);
       ctx.fillStyle = 'rgba(255,255,255,.25)';
       ctx.font = '500 13px var(--font), sans-serif';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(I18n.t('table.empty.noData'), W / 2, H / 2);
       if (legend) legend.innerHTML = '';
+      this._chartState = null;
+      this._chartHitMap = null;
       return;
     }
 
@@ -3689,15 +3688,13 @@ const App = {
     const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
     const step = buckets.length > 1 ? cW / (buckets.length - 1) : cW;
     const slotW = buckets.length > 1 ? cW / buckets.length : cW;
-    const m = this.statsMetrics;
+    const m = { ...this.statsMetrics };
     const type = this.statsChartType;
 
-    // y-max (stacked uses sum of success + errors per bucket)
     let maxY;
     if (type === 'stacked') {
       maxY = Math.max(1, ...buckets.map(b => (m.success ? b.success : 0) + (m.errors ? b.errors : 0) || (m.requests ? b.requests : 0)));
     } else if (type === 'bar') {
-      // Bar mode: one bar per bucket = requests total, regardless of other toggles
       maxY = Math.max(1, ...buckets.map(b => b.requests));
     } else {
       const vals = [];
@@ -3716,6 +3713,55 @@ const App = {
 
     const xAt = (i) => buckets.length > 1 ? pad.l + i * step : pad.l + cW / 2;
     const yAt = (v) => pad.t + cH - (v / maxY) * cH;
+
+    // Persist state — hit-map uses final coords so tooltip works during animation
+    this._chartState = { ctx, W, H, buckets, pad, cH, cW, slotW, step, maxY, m, type, xAt, yAt };
+    this._chartHitMap = { buckets, xAt, yAt, pad, cH, slotW, W, H };
+
+    // Bind hover tooltip once
+    this._bindChartHover();
+
+    // Animate: paint repeatedly with 0 → 1 progress
+    cancelAnimationFrame(this._chartAnim || 0);
+    const start = performance.now();
+    const dur = 480;
+    const loop = (now) => {
+      const t = Math.min(1, (now - start) / dur);
+      const p = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      this._paintChart(p);
+      if (t < 1) this._chartAnim = requestAnimationFrame(loop);
+    };
+    this._chartAnim = requestAnimationFrame(loop);
+
+    // Legend with totals (drawn once, doesn't animate)
+    if (legend) {
+      const totals = {
+        requests: buckets.reduce((a, b) => a + b.requests, 0),
+        success: buckets.reduce((a, b) => a + b.success, 0),
+        errors: buckets.reduce((a, b) => a + b.errors, 0),
+      };
+      const items = [
+        { key: 'requests', label: I18n.t('section.requestChart.legendRequests'), color: this._chartColors.requests },
+        { key: 'success', label: I18n.t('section.requestChart.legendSuccess'), color: this._chartColors.success },
+        { key: 'errors', label: I18n.t('section.requestChart.legendErrors'), color: this._chartColors.errors },
+      ];
+      legend.innerHTML = items.map(it => `
+        <div class="chart-legend-item ${m[it.key] ? '' : 'muted'}" onclick="App.toggleChartMetric('${it.key}')">
+          <span class="chart-legend-swatch dot" style="background:${it.color}"></span>
+          <span>${it.label}</span>
+          <span class="chart-legend-value">${totals[it.key]}</span>
+        </div>
+      `).join('');
+    }
+  },
+
+  _paintChart(progress) {
+    const s = this._chartState;
+    if (!s) return;
+    const { ctx, W, H, buckets, pad, cH, cW, slotW, maxY, m, type, xAt, yAt } = s;
+    const p = progress;
+
+    ctx.clearRect(0, 0, W, H);
 
     // Background gradient fade for the plot area — very subtle
     const bgGrad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
@@ -3749,23 +3795,27 @@ const App = {
       ctx.fillText(this._fmtNum(v), pad.l - 10, y);
     }
 
+    const base = pad.t + cH;
+
     const drawSmoothSeries = (values, color, opts = {}) => {
-      const points = values.map((v, i) => ({ x: xAt(i), y: yAt(v) }));
+      // Animate: lerp each y from the baseline toward target by progress.
+      const points = values.map((v, i) => {
+        const targetY = yAt(v);
+        return { x: xAt(i), y: base + (targetY - base) * p };
+      });
       if (points.length < 1) return;
-      // Fill
       if (opts.fill && points.length >= 2) {
         const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
         grad.addColorStop(0, color + '4d');
         grad.addColorStop(1, color + '00');
         ctx.fillStyle = grad;
         ctx.beginPath();
-        ctx.moveTo(points[0].x, pad.t + cH);
+        ctx.moveTo(points[0].x, base);
         this._smoothPath(ctx, points, false);
-        ctx.lineTo(points[points.length - 1].x, pad.t + cH);
+        ctx.lineTo(points[points.length - 1].x, base);
         ctx.closePath();
         ctx.fill();
       }
-      // Line with shadow glow
       ctx.save();
       ctx.strokeStyle = color;
       ctx.lineWidth = opts.thin ? 1.5 : 2.25;
@@ -3782,37 +3832,37 @@ const App = {
       }
       ctx.stroke();
       ctx.restore();
-      // Data points — only when not too dense, and only on nonzero
-      if (points.length <= 80) {
-        points.forEach((p, i) => {
+      // Data points — only when not too dense, on nonzero, and only after
+      // the growth animation is far enough along so dots don't pop.
+      if (points.length <= 80 && p > 0.6) {
+        const dotOpacity = Math.min(1, (p - 0.6) / 0.4);
+        ctx.save();
+        ctx.globalAlpha = dotOpacity;
+        points.forEach((pt, i) => {
           if (values[i] === 0) return;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, 2.5, 0, Math.PI * 2);
-          ctx.fillStyle = 'var(--bg)';
+          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
           ctx.fillStyle = '#09090b';
           ctx.fill();
           ctx.strokeStyle = color;
           ctx.lineWidth = 1.8;
           ctx.stroke();
         });
+        ctx.restore();
       }
     };
 
     const drawBars = () => {
-      // Single bar per bucket. Color grades from indigo (no errors) through
-      // amber (some) to rose (majority errors). That keeps the chart legible
-      // with wide bars while surfacing errors through color alone.
       const gap = Math.min(3, slotW * 0.2);
       const barW = Math.max(2, slotW - gap);
       buckets.forEach((b, i) => {
         const v = b.requests;
         if (v === 0) return;
-        const h = (v / maxY) * cH;
+        const h = (v / maxY) * cH * p; // animate height
         const errRatio = v > 0 ? b.errors / v : 0;
         const color = this._errorTintedColor(errRatio);
         const x = xAt(i) - barW / 2;
-        const y = pad.t + cH - h;
-        // Gradient fill (brighter at top)
+        const y = base - h;
         const grad = ctx.createLinearGradient(0, y, 0, y + h);
         grad.addColorStop(0, color);
         grad.addColorStop(1, color + 'cc');
@@ -3820,8 +3870,7 @@ const App = {
         const rr = Math.min(barW / 2, 3);
         this._roundRect(ctx, x, y, barW, h, rr);
         ctx.fill();
-        // Subtle top highlight
-        if (barW > 4) {
+        if (barW > 4 && h > 2) {
           ctx.fillStyle = 'rgba(255,255,255,.1)';
           this._roundRect(ctx, x, y, barW, Math.min(2, h), rr);
           ctx.fill();
@@ -3840,18 +3889,20 @@ const App = {
         if (m.errors  && b.errors  > 0) segments.push({ v: b.errors,  color: this._chartColors.errors  });
         if (!segments.length && m.requests && b.requests > 0) segments.push({ v: b.requests, color: this._chartColors.requests });
         segments.forEach((seg, si) => {
-          const h = (seg.v / maxY) * cH;
-          const y = pad.t + cH - ((stackV + seg.v) / maxY) * cH;
+          const segBottomY = base - (stackV / maxY) * cH * p;
+          const segTopY    = base - ((stackV + seg.v) / maxY) * cH * p;
+          const h = segBottomY - segTopY;
+          if (h <= 0) { stackV += seg.v; return; }
           const isTop = si === segments.length - 1;
           const rr = Math.min(barW / 2, 3);
-          const grad = ctx.createLinearGradient(0, y, 0, y + h);
+          const grad = ctx.createLinearGradient(0, segTopY, 0, segBottomY);
           grad.addColorStop(0, seg.color);
           grad.addColorStop(1, seg.color + 'b3');
           ctx.fillStyle = grad;
           if (isTop) {
-            this._roundRectTop(ctx, cx - barW / 2, y, barW, h, rr);
+            this._roundRectTop(ctx, cx - barW / 2, segTopY, barW, h, rr);
           } else {
-            ctx.fillRect(cx - barW / 2, y, barW, h);
+            ctx.fillRect(cx - barW / 2, segTopY, barW, h);
           }
           ctx.fill();
           stackV += seg.v;
@@ -3892,8 +3943,6 @@ const App = {
       const txt = useDate
         ? `${dt.getMonth() + 1}/${dt.getDate()}`
         : dt.getHours().toString().padStart(2, '0') + ':00';
-      // Skip if same label as last one (e.g. several points on the same day)
-      // or too close pixel-wise.
       const x = xAt(i);
       if (txt === lastLabel) return;
       if (x - lastX < minGapPx && i !== buckets.length - 1) return;
@@ -3901,72 +3950,49 @@ const App = {
       lastX = x;
       ctx.fillText(txt, x, pad.t + cH + 10);
     });
+  },
 
-    // Hit-map for tooltip
-    this._chartHitMap = { buckets, xAt, yAt, pad, cH, slotW, W, H };
-
-    // Hover tooltip
-    if (tipEl && !canvas._hoverBound) {
-      canvas._hoverBound = true;
-      canvas.addEventListener('mousemove', (ev) => {
-        const hm = this._chartHitMap;
-        if (!hm) return;
-        const rect = canvas.getBoundingClientRect();
-        const x = ev.clientX - rect.left;
-        const y = ev.clientY - rect.top;
-        if (x < hm.pad.l || x > hm.W - 16 || y < hm.pad.t || y > hm.pad.t + hm.cH) {
-          tipEl.classList.remove('show');
-          return;
-        }
-        // Find nearest bucket
-        let best = 0, bestD = Infinity;
-        hm.buckets.forEach((_, i) => {
-          const d = Math.abs(hm.xAt(i) - x);
-          if (d < bestD) { bestD = d; best = i; }
-        });
-        const b = hm.buckets[best];
-        const rate = b.requests > 0 ? ((b.success / b.requests) * 100).toFixed(1) : '—';
-        const time = new Date(b.hour).toLocaleString();
-        const c = this._chartColors;
-        tipEl.innerHTML = `
-          <div class="tt-time">${this.esc(time)}</div>
-          <div class="tt-row"><span class="tt-dot" style="background:${c.requests}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipRequests')}</span><span class="tt-value">${b.requests}</span></div>
-          <div class="tt-row"><span class="tt-dot" style="background:${c.success}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipSuccess')}</span><span class="tt-value">${b.success}</span></div>
-          <div class="tt-row"><span class="tt-dot" style="background:${c.errors}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipErrors')}</span><span class="tt-value">${b.errors}</span></div>
-          <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipRate')}</span><span class="tt-value">${rate}%</span></div>
-        `;
-        tipEl.classList.add('show');
-        const tipRect = tipEl.getBoundingClientRect();
-        let left = hm.xAt(best);
-        let top = hm.pad.t - 6;
-        if (left + tipRect.width / 2 > hm.W - 4) left = hm.W - tipRect.width / 2 - 4;
-        if (left - tipRect.width / 2 < 4) left = tipRect.width / 2 + 4;
-        tipEl.style.left = left + 'px';
-        tipEl.style.top = top + 'px';
+  _bindChartHover() {
+    const canvas = document.getElementById('stats-canvas');
+    const tipEl  = document.getElementById('stats-tooltip');
+    if (!canvas || !tipEl || canvas._hoverBound) return;
+    canvas._hoverBound = true;
+    canvas.addEventListener('mousemove', (ev) => {
+      const hm = this._chartHitMap;
+      if (!hm) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      if (x < hm.pad.l || x > hm.W - 8 || y < hm.pad.t || y > hm.pad.t + hm.cH) {
+        tipEl.classList.remove('show');
+        return;
+      }
+      let best = 0, bestD = Infinity;
+      hm.buckets.forEach((_, i) => {
+        const d = Math.abs(hm.xAt(i) - x);
+        if (d < bestD) { bestD = d; best = i; }
       });
-      canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
-    }
-
-    // Legend with totals
-    if (legend) {
-      const totals = {
-        requests: buckets.reduce((a, b) => a + b.requests, 0),
-        success: buckets.reduce((a, b) => a + b.success, 0),
-        errors: buckets.reduce((a, b) => a + b.errors, 0),
-      };
-      const items = [
-        { key: 'requests', label: I18n.t('section.requestChart.legendRequests'), color: this._chartColors.requests },
-        { key: 'success', label: I18n.t('section.requestChart.legendSuccess'), color: this._chartColors.success },
-        { key: 'errors', label: I18n.t('section.requestChart.legendErrors'), color: this._chartColors.errors },
-      ];
-      legend.innerHTML = items.map(it => `
-        <div class="chart-legend-item ${m[it.key] ? '' : 'muted'}" onclick="App.toggleChartMetric('${it.key}')">
-          <span class="chart-legend-swatch dot" style="background:${it.color}"></span>
-          <span>${it.label}</span>
-          <span class="chart-legend-value">${totals[it.key]}</span>
-        </div>
-      `).join('');
-    }
+      const b = hm.buckets[best];
+      const rate = b.requests > 0 ? ((b.success / b.requests) * 100).toFixed(1) : '—';
+      const time = new Date(b.hour).toLocaleString();
+      const c = this._chartColors;
+      tipEl.innerHTML = `
+        <div class="tt-time">${this.esc(time)}</div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.requests}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipRequests')}</span><span class="tt-value">${b.requests}</span></div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.success}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipSuccess')}</span><span class="tt-value">${b.success}</span></div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.errors}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipErrors')}</span><span class="tt-value">${b.errors}</span></div>
+        <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipRate')}</span><span class="tt-value">${rate}%</span></div>
+      `;
+      tipEl.classList.add('show');
+      const tipRect = tipEl.getBoundingClientRect();
+      let left = hm.xAt(best);
+      const halfW = tipRect.width / 2;
+      left = Math.min(hm.W - halfW - 6, Math.max(halfW + 6, left));
+      const top = hm.pad.t + 4;
+      tipEl.style.left = left + 'px';
+      tipEl.style.top = top + 'px';
+    });
+    canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
   },
 
   _roundRect(ctx, x, y, w, h, r) {
