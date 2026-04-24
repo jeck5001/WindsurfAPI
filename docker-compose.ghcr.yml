@@ -3,6 +3,8 @@ services:
     image: ${IMAGE_NAME:-ghcr.io/CHANGE_ME/windsurf-api}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     init: true
+    ports:
+      - "${PORT:-3003}:3003"
     env_file:
       - ${ENV_FILE:-.env}
     environment:
@@ -16,14 +18,3 @@ services:
       - ${APP_DATA_DIR:-./.docker-data/data}:/data
       - ${WINDSURF_DIR:-./.docker-data/opt/windsurf}:/opt/windsurf
       - ${WORKSPACE_DIR:-./.docker-data/tmp/windsurf-workspace}:/tmp/windsurf-workspace
-
-  nginx:
-    image: nginx:alpine
-    container_name: windsurf-lb
-    restart: unless-stopped
-    ports:
-      - "${PORT:-3003}:80"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      - windsurf-api
