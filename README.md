@@ -112,6 +112,49 @@ docker compose logs -f
 
 如果想改持久化目录，可在 `.env` 里设置 `DATA_DIR`。Docker 默认已设为 `/data`。
 
+### GHCR + NAS 部署
+
+如果你准备部署到自己的 NAS，推荐把仓库 fork 到你自己的 GitHub，再由 Actions 自动构建并推送镜像到 GHCR，NAS 只负责拉镜像运行。
+
+1. Fork 本仓库到你自己的 GitHub 账号。
+2. 打开 fork 仓库的 `Settings -> Actions -> General`，确认允许 Actions 运行，并把 `Workflow permissions` 设成 `Read and write permissions`，这样内置 `GITHUB_TOKEN` 才能推送 GHCR 包。
+3. 把当前仓库里的 `.github/workflows/docker-publish.yml` 推到你 fork 的默认分支。
+4. 等 GitHub Actions 首次跑完后，在你 fork 仓库右侧或个人主页的 `Packages` 页面确认镜像已经出现，比如 `ghcr.io/<你的 GitHub 用户名>/windsurf-api:latest`。
+5. 如果你的 GHCR 包是私有的，先在 NAS 上登录：
+
+```bash
+docker login ghcr.io
+```
+
+6. 在 NAS 上准备部署目录并拉取部署文件：
+
+```bash
+mkdir -p /volume1/docker/windsurf-api
+cd /volume1/docker/windsurf-api
+curl -O https://raw.githubusercontent.com/<你的 GitHub 用户名>/WindsurfAPI/master/docker-compose.ghcr.yml
+curl -O https://raw.githubusercontent.com/<你的 GitHub 用户名>/WindsurfAPI/master/.env.ghcr.example
+cp .env.ghcr.example .env
+```
+
+如果你的 fork 默认分支不是 `master` 而是 `main`，把上面 URL 里的 `master` 改成 `main`。
+
+7. 编辑 `.env`，至少把 `IMAGE_NAME` 改成你自己的 GHCR 地址，比如 `ghcr.io/<你的 GitHub 用户名>/windsurf-api`。如果 NAS 上的持久化目录不是当前目录，也顺手改掉 `APP_DATA_DIR`、`WINDSURF_DIR`、`WORKSPACE_DIR`。
+8. 启动服务：
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+9. 后续更新镜像也是同样两条命令：
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+如果你要回滚版本，把 `.env` 里的 `IMAGE_TAG` 改成某个发布 tag 或 `sha-<commit>`，再重新执行 `pull` 和 `up -d`。
+
 ### 一键更新
 
 部署过之后要拉最新修复，一条命令搞定：
