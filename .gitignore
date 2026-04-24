@@ -28,3 +28,4 @@ CLAUDE.md
 audit/
 *.png
 .docker-data/
+.worktrees/
