@@ -112,6 +112,49 @@ Default mounts:
 
 If you want a different persistence location, set `DATA_DIR` in `.env`. The Docker setup defaults it to `/data`.
 
+### GHCR + NAS Deployment
+
+If you want to run this on your own NAS, the recommended path is: fork the repository to your own GitHub account, let GitHub Actions publish images to GHCR, then have the NAS pull and run the published image.
+
+1. Fork this repository to your own GitHub account.
+2. Open `Settings -> Actions -> General` in your fork, make sure Actions are enabled, and set `Workflow permissions` to `Read and write permissions` so the built-in `GITHUB_TOKEN` can publish GHCR packages.
+3. Push `.github/workflows/docker-publish.yml` to the default branch of your fork.
+4. After the first workflow run finishes, confirm the package exists under GitHub `Packages`, for example `ghcr.io/<your GitHub username>/windsurf-api:latest`.
+5. If the package is private, log in on the NAS first:
+
+```bash
+docker login ghcr.io
+```
+
+6. Prepare a deployment directory on the NAS and fetch the deployment files:
+
+```bash
+mkdir -p /volume1/docker/windsurf-api
+cd /volume1/docker/windsurf-api
+curl -O https://raw.githubusercontent.com/<your GitHub username>/WindsurfAPI/master/docker-compose.ghcr.yml
+curl -O https://raw.githubusercontent.com/<your GitHub username>/WindsurfAPI/master/.env.ghcr.example
+cp .env.ghcr.example .env
+```
+
+If your fork uses `main` instead of `master` as the default branch, replace `master` with `main` in the URLs above.
+
+7. Edit `.env` and change `IMAGE_NAME` to your own GHCR path, for example `ghcr.io/<your GitHub username>/windsurf-api`. If your NAS stores persistent data elsewhere, also update `APP_DATA_DIR`, `WINDSURF_DIR`, and `WORKSPACE_DIR`.
+8. Start the stack:
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+9. Upgrade later with the same two commands:
+
+```bash
+docker compose -f docker-compose.ghcr.yml pull
+docker compose -f docker-compose.ghcr.yml up -d
+```
+
+For rollbacks, change `IMAGE_TAG` in `.env` to a release tag or `sha-<commit>`, then run `pull` and `up -d` again.
+
 ### One-Click Update
 
 To pull the latest fixes after deployment, just run one command:
