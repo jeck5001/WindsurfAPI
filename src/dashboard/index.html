@@ -2563,9 +2563,9 @@ const App = {
         const promptTip = cr.prompt?.limit ? `${cr.prompt.remaining || 0} / ${cr.prompt.limit}` : '';
         creditCell = `<div style="min-width:130px;max-width:180px">
             <div class="text-xs" style="margin-bottom:3px"><b>${this.esc(planName.slice(0, 12))}</b> <span style="color:var(--text-dim)">${fetchedAgo}</span></div>
-            ${bar('D', cr.dailyPercent, dailyTip)}
-            ${bar('W', cr.weeklyPercent, weeklyTip)}
-            ${bar('P', promptPct, promptTip)}
+            ${bar(I18n.t('creditsBar.dailyShort'), cr.dailyPercent, dailyTip)}
+            ${bar(I18n.t('creditsBar.weeklyShort'), cr.weeklyPercent, weeklyTip)}
+            ${bar(I18n.t('creditsBar.promptShort'), promptPct, promptTip)}
           </div>`;
       }
       return `
