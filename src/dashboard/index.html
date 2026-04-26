@@ -478,6 +478,16 @@ thead th {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
+thead th.th-help {
+  cursor: help;
+}
+thead th.th-help::after {
+  content: " ⓘ";
+  opacity: .5;
+  font-size: 10px;
+  margin-left: 3px;
+  letter-spacing: normal;
+}
 tbody td {
   padding: 11px 16px;
   border-bottom: 1px solid var(--border);
@@ -491,6 +501,204 @@ tbody tr:hover td { background: var(--surface-2); }
   color: var(--text-dim);
   padding: 32px 16px;
   font-style: italic;
+}
+
+/* ─── Account detail panel (expand-in-row) ──────────── */
+.expand-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all .15s ease;
+  font-size: 10px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.expand-chevron:hover {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.expand-chevron.open {
+  color: var(--accent);
+  transform: rotate(90deg);
+}
+.account-detail-row > td {
+  padding: 0 !important;
+  background: #0d0d10 !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.account-detail-wrap {
+  padding: 20px 28px;
+  background: linear-gradient(180deg, rgba(99,102,241,.04), transparent 80%);
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+@media (max-width: 1100px) { .detail-grid { grid-template-columns: 1fr; } }
+.detail-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.detail-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  margin-bottom: 10px;
+}
+.detail-card-head .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+.detail-kv {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  gap: 4px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.detail-kv > .k { color: var(--text-dim); }
+.detail-kv > .v { color: var(--text); font-variant-numeric: tabular-nums; }
+.detail-kv code { font-size: 11px; padding: 1px 5px; }
+
+.detail-bar {
+  display: grid;
+  grid-template-columns: 60px 1fr 50px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.detail-bar .bar-label { color: var(--text-dim); font-size: 11px; }
+.detail-bar .bar-track {
+  height: 7px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.detail-bar .bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width .6s cubic-bezier(.2,.8,.2,1);
+}
+.detail-bar .bar-pct {
+  text-align: right;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.detail-bar .bar-reset {
+  grid-column: 2 / 4;
+  font-size: 10.5px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  margin-top: 2px;
+}
+
+/* Model list grouped by provider */
+.model-list-card { grid-column: 1 / -1; }
+.model-group {
+  margin-bottom: 14px;
+}
+.model-group:last-child { margin-bottom: 0; }
+.model-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  padding-bottom: 5px;
+  border-bottom: 1px dashed var(--border);
+}
+.model-group-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: .02em;
+}
+.model-group-count {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+.model-chips {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 6px;
+}
+.model-chip {
+  display: grid;
+  grid-template-columns: 10px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11.5px;
+  transition: all .15s ease;
+}
+.model-chip:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-3);
+}
+.model-chip.blocked {
+  opacity: .45;
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dim);
+  text-decoration-thickness: 1px;
+}
+.model-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.model-chip.blocked .model-chip-dot { background: var(--error); }
+.model-chip-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-chip-cost {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--warn);
+  padding: 1px 6px;
+  background: rgba(245,158,11,.08);
+  border: 1px solid rgba(245,158,11,.2);
+  border-radius: 10px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.provider-swatch {
+  width: 14px; height: 14px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 6px;
+  vertical-align: middle;
 }
 
 /* ─── Badges ──────────────────────────────────── */
@@ -670,7 +878,7 @@ tbody tr:hover td { background: var(--surface-2); }
 
 /* ─── Chart ───────────────────────────────────── */
 .chart {
-  padding: 24px;
+  padding: 22px 24px 20px;
   background: linear-gradient(135deg, var(--surface), rgba(59,130,246,.03));
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -688,7 +896,262 @@ tbody tr:hover td { background: var(--surface-2); }
   animation: chart-shimmer 3s linear infinite;
 }
 @keyframes chart-shimmer { 0%{background-position:200% 0} 100%{background-position:0 0} }
-.chart h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; }
+.chart h3 { font-size: 14px; font-weight: 600; margin: 0; letter-spacing: -.01em; }
+.chart-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.chart-title-group { min-width: 0; flex: 1; }
+.chart-subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 4px;
+  letter-spacing: .01em;
+}
+.chart-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Segmented button group — for chart-type / range switches */
+.seg-group {
+  display: inline-flex;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+.seg-btn {
+  padding: 5px 11px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all .18s ease;
+  font-family: inherit;
+  letter-spacing: -.005em;
+  white-space: nowrap;
+}
+.seg-btn:hover {
+  color: var(--text);
+  background: rgba(255,255,255,.03);
+}
+.seg-btn.active {
+  color: #fff;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
+  box-shadow: 0 1px 3px rgba(59,130,246,.35), 0 0 0 0.5px rgba(255,255,255,.06) inset;
+}
+
+/* Main chart canvas */
+.chart-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 280px;
+  padding-top: 6px;
+}
+.chart-canvas-wrap canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.chart-range-indicator {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  padding: 3px 8px;
+  background: rgba(255,255,255,.02);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  pointer-events: none;
+  letter-spacing: .01em;
+}
+
+/* Custom date range popup */
+.custom-range-popup {
+  position: relative;
+  margin-top: 14px;
+  padding: 18px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  max-width: 420px;
+}
+.custom-range-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text);
+}
+.custom-range-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.custom-range-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 500;
+  letter-spacing: .01em;
+}
+.custom-range-fields input[type="date"] {
+  font-family: var(--mono);
+  font-size: 12px;
+  color-scheme: dark;
+}
+.custom-range-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+.custom-range-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.chart-tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: rgba(17,17,24,.96);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  border: 1px solid var(--border-strong);
+  box-shadow: 0 8px 28px rgba(0,0,0,.5);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  transform: translate(-50%, 0);
+  transition: opacity .12s ease, left .08s ease-out;
+  z-index: 5;
+  white-space: nowrap;
+}
+.chart-tooltip.show { opacity: 1; }
+.chart-tooltip .tt-time { color: var(--text-dim); font-size: 11px; margin-bottom: 4px; }
+.chart-tooltip .tt-row { display: flex; align-items: center; gap: 6px; }
+.chart-tooltip .tt-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.chart-tooltip .tt-label { color: var(--text-dim); margin-right: 4px; }
+.chart-tooltip .tt-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+/* Chart legend */
+.chart-legend {
+  display: flex;
+  gap: 18px;
+  justify-content: center;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  transition: opacity .15s ease;
+}
+.chart-legend-item.muted { opacity: .4; }
+.chart-legend-item:hover { color: var(--text); }
+.chart-legend-swatch {
+  width: 14px; height: 4px;
+  border-radius: 2px;
+}
+.chart-legend-swatch.dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+}
+.chart-legend-value {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Secondary chart grid (pie etc.) */
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+@media (min-width: 960px) {
+  .chart-grid { grid-template-columns: 1fr; }
+}
+
+.chart-pie-body {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 28px;
+  align-items: center;
+}
+@media (max-width: 680px) {
+  .chart-pie-body { grid-template-columns: 1fr; }
+}
+.chart-pie-body canvas {
+  width: 200px;
+  height: 200px;
+  display: block;
+  margin: 0 auto;
+}
+.pie-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+.pie-legend-item {
+  display: grid;
+  grid-template-columns: 12px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: 6px;
+  transition: background .15s ease;
+}
+.pie-legend-item:hover { background: var(--surface-2); }
+.pie-legend-dot {
+  width: 10px; height: 10px; border-radius: 3px;
+}
+.pie-legend-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pie-legend-count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.pie-legend-pct {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  font-size: 11px;
+  min-width: 38px;
+  text-align: right;
+}
 .bars {
   display: flex;
   align-items: flex-end;
@@ -929,19 +1392,35 @@ tbody tr:hover td { background: var(--surface-2); }
   .sidebar nav a { justify-content: center; padding: 10px; }
   .main { margin-left: 60px; padding: 20px 16px; }
 }
-.contributor-list { display: flex; flex-direction: column; gap: 12px; }
-.contributor-card { display: flex; gap: 16px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); transition: border-color .15s; }
+.contributor-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 12px; }
+.contributor-card { display: flex; gap: 14px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); transition: border-color .15s; min-width: 0; }
 .contributor-card:hover { border-color: var(--accent); }
-.contributor-card .avatar { width: 64px; height: 64px; border-radius: 50%; flex: none; border: 2px solid var(--border); background: var(--surface-2); object-fit: cover; }
+.contributor-card .avatar { width: 48px; height: 48px; border-radius: 50%; flex: none; border: 2px solid var(--border); background: var(--surface-2); object-fit: cover; }
 .contributor-card .meta { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
-.contributor-card .meta-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.contributor-card .meta-top { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.contributor-card .identity { display: flex; align-items: center; gap: 8px; min-width: 0; flex-wrap: wrap; }
+.contributor-card .links { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .contributor-card .meta-top .name { color: var(--accent); font-weight: 600; font-size: 15px; text-decoration: none; }
 .contributor-card .meta-top .name:hover { text-decoration: underline; }
 .contributor-card .meta-top .pr-link { font-size: 12px; color: var(--text-dim); text-decoration: none; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; }
 .contributor-card .meta-top .pr-link:hover { color: var(--accent); border-color: var(--accent); }
 .contributor-card .meta-top .merged-at { font-size: 11px; color: var(--text-dim); }
-.contributor-card .pr-title { font-weight: 500; margin-top: 4px; font-size: 13px; }
+.contributor-card .pr-title { font-weight: 500; margin-top: 2px; font-size: 13px; line-height: 1.45; }
+.contributor-card .summary-toggle { margin-top: 6px; font-size: 12px; color: var(--text-dim); }
+.contributor-card .summary-toggle summary { cursor: pointer; width: fit-content; user-select: none; }
+.contributor-card .summary-toggle summary:hover { color: var(--accent); }
 .contributor-card .summary { font-size: 13px; color: var(--text-muted); line-height: 1.65; margin-top: 6px; }
+.contributor-card .rarity-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 0.7px; font-family: var(--font-mono, ui-monospace, monospace); line-height: 1.5; }
+.contributor-card .rarity-UR { background: linear-gradient(135deg, #f5d06f, #e11d48 52%, #7c3aed); color: #fff; box-shadow: 0 0 0 1px rgba(225,29,72,0.28); }
+.contributor-card .rarity-SSR { background: linear-gradient(135deg, #f59e0b, #b45309); color: #fff7ed; box-shadow: 0 0 0 1px rgba(180,83,9,0.25); }
+.contributor-card .rarity-SR { background: var(--info-soft); color: var(--info); border: 1px solid rgba(59,130,246,0.28); }
+@media (max-width: 640px) {
+  .contributor-list { grid-template-columns: 1fr; }
+  .contributor-card { padding: 12px; gap: 12px; }
+  .contributor-card .avatar { width: 40px; height: 40px; }
+  .contributor-card .meta-top { grid-template-columns: 1fr; }
+  .contributor-card .links { justify-content: flex-start; }
+}
 </style>
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js';
@@ -1293,7 +1772,7 @@ window._firebaseOAuth = async function(provider) {
       <div class="section-body tight">
         <div class="table-wrap">
           <table id="accounts-table">
-            <thead><tr><th data-i18n="table.header.id">ID</th><th data-i18n="table.header.label">标签</th><th data-i18n="table.header.tier">层级</th><th data-i18n="table.header.rpm">RPM</th><th data-i18n="table.header.credits">余额</th><th data-i18n="table.header.models">可用模型</th><th data-i18n="table.header.status">状态</th><th data-i18n="table.header.error">错误</th><th data-i18n="table.header.lastUsed">最后使用</th><th data-i18n="table.header.key">Key</th><th data-i18n="table.header.action">操作</th></tr></thead>
+            <thead><tr><th data-i18n="table.header.id">ID</th><th data-i18n="table.header.label">标签</th><th data-i18n="table.header.tier">层级</th><th data-i18n="table.header.rpm">RPM</th><th class="th-help" data-i18n="table.header.credits" data-i18n-title="creditsBar.columnTooltip" title="配额使用情况&#10;&#10;日 — 每日高级请求剩余百分比（重置频繁）&#10;周 — 每周高级请求剩余百分比（Trial 账号重点看这条）&#10;&#10;数值越高 = 剩余越多 = 越安全&#10;悬停单条进度条可查看重置时间">余额</th><th data-i18n="table.header.models">可用模型</th><th data-i18n="table.header.status">状态</th><th data-i18n="table.header.error">错误</th><th data-i18n="table.header.lastUsed">最后使用</th><th data-i18n="table.header.key">Key</th><th data-i18n="table.header.action">操作</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -1479,16 +1958,67 @@ window._firebaseOAuth = async function(provider) {
       </div>
     </div>
     <div class="metrics-grid" id="stats-cards"></div>
-    <div class="chart">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:10px">
-        <h3 style="margin:0" data-i18n="section.requestChart.title">请求量时间序列</h3>
-        <div class="btn-group" role="tablist">
-          <button class="btn btn-ghost btn-xs stats-range-btn" data-range="6" onclick="App.setStatsRange(6)" data-i18n="range.6h">近 6h</button>
-          <button class="btn btn-ghost btn-xs stats-range-btn active" data-range="24" onclick="App.setStatsRange(24)" data-i18n="range.24h">近 24h</button>
-          <button class="btn btn-ghost btn-xs stats-range-btn" data-range="72" onclick="App.setStatsRange(72)" data-i18n="range.72h">近 72h</button>
+    <div class="chart chart-main">
+      <div class="chart-header">
+        <div class="chart-title-group">
+          <h3 data-i18n="section.requestChart.title">请求量时间序列</h3>
+          <div class="chart-subtitle" data-i18n="section.requestChart.subtitle">切换图表类型和时间范围 · 悬停查看具体数值</div>
+        </div>
+        <div class="chart-controls">
+          <div class="seg-group" role="tablist">
+            <button class="seg-btn stats-type-btn" data-type="area" onclick="App.setChartType('area')" data-i18n="section.requestChart.typeArea">面积图</button>
+            <button class="seg-btn stats-type-btn" data-type="line" onclick="App.setChartType('line')" data-i18n="section.requestChart.typeLine">折线图</button>
+            <button class="seg-btn stats-type-btn active" data-type="bar" onclick="App.setChartType('bar')" data-i18n="section.requestChart.typeBar">柱状图</button>
+            <button class="seg-btn stats-type-btn" data-type="stacked" onclick="App.setChartType('stacked')" data-i18n="section.requestChart.typeStacked">堆叠图</button>
+          </div>
+          <div class="seg-group" role="tablist">
+            <button class="seg-btn stats-range-btn" data-range="6" onclick="App.setStatsRange(6)" data-i18n="range.6h">6小时</button>
+            <button class="seg-btn stats-range-btn active" data-range="24" onclick="App.setStatsRange(24)" data-i18n="range.24h">24小时</button>
+            <button class="seg-btn stats-range-btn" data-range="168" onclick="App.setStatsRange(168)" data-i18n="range.7d">7天</button>
+            <button class="seg-btn stats-range-btn" data-range="720" onclick="App.setStatsRange(720)" data-i18n="range.30d">30天</button>
+            <button class="seg-btn stats-range-btn" data-range="all" onclick="App.setStatsRange('all')" data-i18n="range.all">全部</button>
+            <button class="seg-btn stats-range-btn" data-range="custom" onclick="App.openCustomRange()" data-i18n="range.custom">自定义</button>
+          </div>
         </div>
       </div>
-      <div class="bars" id="stats-chart"></div>
+      <div class="chart-canvas-wrap">
+        <canvas id="stats-canvas"></canvas>
+        <div class="chart-tooltip" id="stats-tooltip"></div>
+        <div class="chart-range-indicator" id="stats-range-indicator"></div>
+      </div>
+      <div class="custom-range-popup" id="custom-range-popup" style="display:none">
+        <div class="custom-range-title" data-i18n="range.customTitle">自定义日期范围</div>
+        <div class="custom-range-fields">
+          <label>
+            <span data-i18n="range.customStart">起始日期</span>
+            <input type="date" id="range-start" class="input">
+          </label>
+          <label>
+            <span data-i18n="range.customEnd">结束日期</span>
+            <input type="date" id="range-end" class="input">
+          </label>
+        </div>
+        <div class="custom-range-hint" data-i18n="range.customHint">最多显示最近 30 天数据</div>
+        <div class="custom-range-actions">
+          <button class="btn btn-ghost btn-sm" onclick="App.closeCustomRange()" data-i18n="range.customCancel">取消</button>
+          <button class="btn btn-primary btn-sm" onclick="App.applyCustomRange()" data-i18n="range.customApply">应用</button>
+        </div>
+      </div>
+      <div class="chart-legend" id="stats-legend"></div>
+    </div>
+    <div class="chart-grid">
+      <div class="chart chart-pie">
+        <div class="chart-header">
+          <div class="chart-title-group">
+            <h3 data-i18n="section.modelPie.title">模型请求量分布</h3>
+            <div class="chart-subtitle" data-i18n="section.modelPie.desc">前 8 个模型的请求量占比</div>
+          </div>
+        </div>
+        <div class="chart-pie-body">
+          <canvas id="model-pie-canvas"></canvas>
+          <div class="pie-legend" id="model-pie-legend"></div>
+        </div>
+      </div>
     </div>
     <div class="section">
       <div class="section-header">
@@ -1616,34 +2146,28 @@ window._firebaseOAuth = async function(provider) {
     <div class="section" style="margin-top:24px">
       <div class="section-header">
         <div>
-          <div class="section-title" data-i18n="section.identityPrompt.title">模型身份注入</div>
-          <div class="section-desc" data-i18n="section.identityPrompt.desc">开启后在每个请求最前面注入一条系统提示词，覆盖 Cascade 自带的 Windsurf 身份；下面每个厂商的模板可自定义，保存后立即生效</div>
-        </div>
-      </div>
-      <div class="section-body">
-        <div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;padding:12px;background:var(--surface-2);border-radius:var(--radius)">
-          <label class="switch">
-            <input type="checkbox" id="exp-identity-prompt" onchange="App.toggleExperimental('modelIdentityPrompt', this.checked)">
-            <span class="switch-slider"></span>
-          </label>
-          <div style="flex:1">
-            <div style="font-weight:600" data-i18n="section.identityPrompt.enable">启用模型身份注入</div>
-            <div class="text-sm text-muted" data-i18n="section.identityPrompt.hint">默认开启；关闭后下面的模板不起作用</div>
-          </div>
-        </div>
-        <div class="section-desc" style="margin-bottom:10px" data-i18n="section.identityPrompt.templateHint">每个厂商的模板可编辑，{{model}} 占位符会被替换成请求的模型名（例如 claude-opus-4.6）。</div>
-        <div style="margin-bottom:10px"><input type="text" class="input" data-i18n-placeholder="field.searchProvider.placeholder" placeholder="搜索提供商..." id="identity-search" oninput="App.filterIdentityPrompts(this.value)" style="max-width:280px"></div>
-        <div id="identity-prompts-editor" style="display:grid;gap:14px"></div>
-      </div>
-    </div>
-    <div class="section" style="margin-top:24px">
-      <div class="section-header">
-        <div>
           <div class="section-title" data-i18n="section.systemPrompts.title">系统提示词</div>
           <div class="section-desc" data-i18n="section.systemPrompts.desc">工具注入、对话模式等内置提示词模板。修改后立即生效，点"重置"恢复默认。</div>
         </div>
       </div>
       <div class="section-body" id="system-prompts-editor" style="display:grid;gap:14px"></div>
+    </div>
+    <div class="section" style="margin-top:24px">
+      <div class="section-header">
+        <div>
+          <div class="section-title" data-i18n="section.skin.title">界面风格</div>
+          <div class="section-desc" data-i18n="section.skin.desc">控制台外观。默认现代风；手绘草稿风是实验性 UI，部分功能简化或采用不同布局。切换后页面会刷新。</div>
+        </div>
+      </div>
+      <div class="section-body">
+        <div style="display:flex;align-items:center;gap:16px;padding:12px;background:var(--surface-2);border-radius:var(--radius)">
+          <select id="skin-select" class="input" style="max-width:240px" onchange="App.switchSkin(this.value)">
+            <option value="modern" data-i18n="skin.modern">默认现代风</option>
+            <option value="sketch" data-i18n="skin.sketch">手绘草稿风（实验）</option>
+          </select>
+          <div class="text-sm text-muted" data-i18n="skin.hint">选择后立即写入 cookie 并刷新</div>
+        </div>
+      </div>
     </div>
   </section>
 </main>
@@ -2236,7 +2760,7 @@ const App = {
           <table style="background:transparent">
             <tr><td style="color:var(--text-muted);width:120px">${I18n.t('loginResult.fields.email')}</td><td>${this.esc(r.email)}</td></tr>
             <tr><td style="color:var(--text-muted)">${I18n.t('loginResult.fields.name')}</td><td>${this.esc(r.name || '-')}</td></tr>
-            <tr><td style="color:var(--text-muted)">${I18n.t('loginResult.fields.apiKey')}</td><td><code class="break-all">${this.esc(r.apiKey)}</code></td></tr>
+            <tr><td style="color:var(--text-muted)">${I18n.t('loginResult.fields.apiKey')}</td><td><code class="break-all">${this.esc(r.apiKey_masked || r.apiKey || '')}</code></td></tr>
             ${r.account ? `<tr><td style="color:var(--text-muted)">${I18n.t('loginResult.fields.accountId')}</td><td><code>${r.account.id}</code> <span class="badge active">${r.account.status}</span></td></tr>` : ''}
           </table>
         </div>`);
@@ -2271,7 +2795,7 @@ const App = {
                   <td>${this.esc(r.email || '-')}</td>
                   <td><span class="badge ${r.success ? 'active' : 'error'}">${r.success ? I18n.t('batch.success') : I18n.t('batch.fail')}</span></td>
                   <td class="text-sm">${r.success
-                    ? `<span class="break-all"><code>${this.esc(r.apiKey ? r.apiKey.slice(0, 16) + '...' : '-')}</code>${r.account ? ` · ${I18n.t('table.header.account')} ${this.esc(r.account.id)}` : ''}</span>`
+                    ? `<span class="break-all"><code>${this.esc(r.apiKey_masked || (r.apiKey ? r.apiKey.slice(0, 16) + '...' : '-'))}</code>${r.account ? ` · ${I18n.t('table.header.account')} ${this.esc(r.account.id)}` : ''}</span>`
                     : `<span style="color:var(--error)">${this.esc(r.error || I18n.t('error.unknown'))}</span>`}</td>
                 </tr>
               `).join('')}
@@ -2337,7 +2861,7 @@ const App = {
       const r = await this.api('POST', '/windsurf-login', { email, password, proxy, autoAdd });
       if (r.success) {
         entry.status = 'success';
-        entry.apiKey = r.apiKey?.slice(0, 16) + '...';
+        entry.apiKey = r.apiKey_masked || (r.apiKey?.slice(0, 16) + '...');
         this.renderSingleWindsurfLoginResult(r, autoAdd);
         this.toast(autoAdd ? I18n.t('toast.loginSuccessAdded') : I18n.t('toast.loginSuccess'), 'success');
         this.loadAccounts();
@@ -2390,7 +2914,7 @@ const App = {
           email: item.email,
           proxy: this.getWindsurfProxyLabel(proxy),
           status: item.success ? 'success' : `error: ${item.error || 'unknown'}`,
-          apiKey: item.success && item.apiKey ? item.apiKey.slice(0, 16) + '...' : undefined,
+          apiKey: item.success ? (item.apiKey_masked || (item.apiKey ? item.apiKey.slice(0, 16) + '...' : undefined)) : undefined,
         })));
       this.toast(I18n.t('batch.importComplete', {success: r.successCount || 0, fail: r.failCount || 0}), (r.failCount || 0) ? 'info' : 'success');
       if ((r.successCount || 0) > 0) {
@@ -2545,36 +3069,40 @@ const App = {
         const planName = cr.planName || '-';
         const fetchedAgo = cr.fetchedAt ? Math.round((Date.now() - cr.fetchedAt) / 60000) + 'm ago' : '-';
         const barColor = (v) => v == null ? 'var(--text-dim)' : v <= 10 ? 'var(--error)' : v <= 30 ? 'var(--warn, #f59e0b)' : 'var(--success, #10b981)';
-        const bar = (label, pct) => {
-          if (pct == null) return '';
-          const v = Math.max(0, Math.min(100, pct));
-          const c = barColor(v);
-          return `<div style="display:flex;align-items:center;gap:4px;margin-top:2px">
-            <span class="text-xs" style="width:28px;flex-shrink:0;color:var(--text-dim)">${label}</span>
-            <div style="flex:1;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden">
-              <div style="height:100%;width:${v}%;background:${c};transition:width .3s"></div>
+        const bar = (label, pct, detail) => {
+          const noData = pct == null;
+          const v = noData ? 0 : Math.max(0, Math.min(100, pct));
+          const c = noData ? 'var(--text-dim)' : barColor(v);
+          return `<div style="display:flex;align-items:center;gap:3px;margin-top:2px" title="${detail || (noData ? 'N/A' : '')}">
+            <span class="text-xs" style="width:14px;flex-shrink:0;color:var(--text-dim);font-size:10px;font-weight:600">${label}</span>
+            <div style="flex:1;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;min-width:40px">
+              <div style="height:100%;width:${noData ? 0 : v}%;background:${c};border-radius:2px;transition:width .4s ease"></div>
             </div>
-            <span class="text-xs" style="width:28px;text-align:right;color:${c}">${v.toFixed(0)}%</span>
+            <span class="text-xs" style="width:28px;text-align:right;color:${c};font-size:10px">${noData ? '--' : v.toFixed(0)+'%'}</span>
           </div>`;
         };
-        const promptPct = cr.prompt?.limit ? ((cr.prompt.remaining || 0) / cr.prompt.limit) * 100 : null;
-        const tipLines = [
-          `Plan: ${planName}`,
-          cr.dailyResetAt ? `Daily reset: ${new Date(cr.dailyResetAt * 1000).toLocaleString()}` : '',
-          cr.weeklyResetAt ? `Weekly reset: ${new Date(cr.weeklyResetAt * 1000).toLocaleString()}` : '',
-          cr.flex?.limit ? `Flex: ${(cr.flex.used || 0).toFixed(0)}/${cr.flex.limit.toFixed(0)}` : '',
-          `Updated: ${fetchedAgo}`,
-        ].filter(Boolean).join('\n');
-        creditCell = `<div style="min-width:120px" title="${this.esc(tipLines)}">
+        const fmtReset = (unix) => unix ? new Date(unix * 1000).toLocaleString() : I18n.t('creditsBar.noResetTime');
+        const dailyTip = cr.dailyPercent != null
+          ? I18n.t('creditsBar.dailyDetail', { pct: cr.dailyPercent.toFixed(0), reset: fmtReset(cr.dailyResetAt) })
+          : I18n.t('creditsBar.dailyNA');
+        const weeklyTip = cr.weeklyPercent != null
+          ? I18n.t('creditsBar.weeklyDetail', { pct: cr.weeklyPercent.toFixed(0), reset: fmtReset(cr.weeklyResetAt) })
+          : I18n.t('creditsBar.weeklyNA');
+        const shortD = I18n.t('creditsBar.dailyShort');
+        const shortW = I18n.t('creditsBar.weeklyShort');
+        creditCell = `<div style="min-width:120px;max-width:160px">
             <div class="text-xs" style="margin-bottom:2px"><b>${this.esc(planName.slice(0, 12))}</b> <span style="color:var(--text-dim)">${fetchedAgo}</span></div>
-            ${bar(I18n.t('creditsBar.daily'), cr.dailyPercent)}
-            ${bar(I18n.t('creditsBar.weekly'), cr.weeklyPercent)}
-            ${bar('P', promptPct)}
+            ${bar(shortD, cr.dailyPercent, dailyTip)}
+            ${bar(shortW, cr.weeklyPercent, weeklyTip)}
           </div>`;
       }
+      const isExpanded = this._expandedAccounts?.has(a.id);
       return `
-      <tr>
-        <td><code>${a.id}</code></td>
+      <tr${isExpanded ? ' class="expanded"' : ''}>
+        <td>
+          <button class="expand-chevron ${isExpanded ? 'open' : ''}" onclick="App.toggleAccountDetail('${this.escJsAttr(a.id)}')" title="${I18n.t('account.detail.toggle')}">▸</button>
+          <code>${a.id}</code>
+        </td>
         <td>${this.esc(a.email)}</td>
         <td>
           <div style="display:flex;flex-direction:column;gap:2px">
@@ -2602,8 +3130,176 @@ const App = {
             <button class="btn btn-ghost btn-xs" style="color:var(--error)" onclick="App.deleteAccount('${this.escJsAttr(a.id)}')">${I18n.t('action.delete')}</button>
           </div>
         </td>
-      </tr>`;
+      </tr>${isExpanded ? `<tr class="account-detail-row"><td colspan="11">${this.renderAccountDetail(a)}</td></tr>` : ''}`;
     }).join('') || `<tr class="empty-row"><td colspan="11">${I18n.t('table.empty.accounts')}</td></tr>`;
+  },
+
+  _expandedAccounts: new Set(),
+  _modelsCatalog: null,
+
+  async _ensureModelsCatalog() {
+    if (this._modelsCatalog) return this._modelsCatalog;
+    try {
+      const r = await this.api('GET', '/models');
+      this._modelsCatalog = {};
+      for (const m of (r.models || [])) this._modelsCatalog[m.id] = m;
+    } catch {
+      this._modelsCatalog = {};
+    }
+    return this._modelsCatalog;
+  },
+
+  toggleAccountDetail(id) {
+    if (!this._expandedAccounts) this._expandedAccounts = new Set();
+    if (this._expandedAccounts.has(id)) {
+      this._expandedAccounts.delete(id);
+    } else {
+      this._expandedAccounts.add(id);
+      this._ensureModelsCatalog().then(() => this.loadAccounts());
+      return;
+    }
+    this.loadAccounts();
+  },
+
+  renderAccountDetail(a) {
+    const cr = a.credits || {};
+    const us = a.userStatus || {};
+    const catalog = this._modelsCatalog || {};
+    const T = (k, v) => I18n.t('account.detail.' + k, v);
+    const barColor = (v) => v == null ? 'var(--text-dim)' : v <= 10 ? 'var(--error)' : v <= 30 ? 'var(--warn, #f59e0b)' : 'var(--success, #10b981)';
+    const fmtUnix = (u) => u ? new Date(u * 1000).toLocaleString() : '—';
+    const fmtDate = (v) => v ? new Date(v).toLocaleDateString() : '—';
+    const fmtAgo = (ts) => {
+      if (!ts) return '—';
+      const s = Math.floor((Date.now() - ts) / 1000);
+      if (s < 60) return `${s}s ${T('ago')}`;
+      if (s < 3600) return `${Math.floor(s/60)}m ${T('ago')}`;
+      if (s < 86400) return `${Math.floor(s/3600)}h ${T('ago')}`;
+      return `${Math.floor(s/86400)}d ${T('ago')}`;
+    };
+    const renderBar = (label, pct, resetAt, noDataText) => {
+      const isN = pct == null;
+      const v = isN ? 0 : Math.max(0, Math.min(100, pct));
+      const c = isN ? 'var(--text-dim)' : barColor(v);
+      const track = `<div class="bar-track"><div class="bar-fill" style="width:${v}%;background:${c}"></div></div>`;
+      const val = isN ? '—' : v.toFixed(0) + '%';
+      const reset = resetAt
+        ? `<div class="bar-reset">⟳ ${T('resetAt')} ${fmtUnix(resetAt)}</div>`
+        : (isN && noDataText ? `<div class="bar-reset" style="color:var(--warn)">${noDataText}</div>` : '');
+      return `<div class="detail-bar">
+        <span class="bar-label">${label}</span>
+        ${track}
+        <span class="bar-pct" style="color:${c}">${val}</span>
+        ${reset}
+      </div>`;
+    };
+
+    // Group tierModels by provider
+    const tierModels = a.tierModels || [];
+    const blocked = new Set(a.blockedModels || []);
+    const providerOrder = ['anthropic', 'openai', 'google', 'deepseek', 'xai', 'alibaba', 'moonshot', 'zhipu', 'minimax', 'windsurf', 'other'];
+    const providerColors = {
+      anthropic: '#d97706', openai: '#10b981', google: '#4285f4', deepseek: '#7c3aed',
+      xai: '#e11d48', alibaba: '#ec4899', moonshot: '#06b6d4', zhipu: '#8b5cf6',
+      minimax: '#f43f5e', windsurf: '#6366f1', other: '#71717a',
+    };
+    const providerLabels = {
+      anthropic: 'Anthropic · Claude', openai: 'OpenAI · GPT / o', google: 'Google · Gemini',
+      deepseek: 'DeepSeek', xai: 'xAI · Grok', alibaba: 'Alibaba · Qwen',
+      moonshot: 'Moonshot · Kimi', zhipu: 'Zhipu · GLM', minimax: 'MiniMax',
+      windsurf: 'Windsurf · SWE', other: 'Other',
+    };
+    const groups = {};
+    for (const m of tierModels) {
+      const info = catalog[m] || {};
+      const prov = info.provider || 'other';
+      (groups[prov] = groups[prov] || []).push({ id: m, ...info });
+    }
+    const availCount = tierModels.length - blocked.size;
+    const modelGroupsHtml = providerOrder
+      .filter(p => groups[p])
+      .map(p => {
+        const models = groups[p].sort((a, b) => (a.credit || 0) - (b.credit || 0));
+        const blockedIn = models.filter(m => blocked.has(m.id)).length;
+        const availIn = models.length - blockedIn;
+        return `<div class="model-group">
+          <div class="model-group-head">
+            <span class="model-group-name"><span class="provider-swatch" style="background:${providerColors[p]}"></span>${providerLabels[p] || p}</span>
+            <span class="model-group-count">${availIn}/${models.length}</span>
+          </div>
+          <div class="model-chips">
+            ${models.map(m => `<div class="model-chip ${blocked.has(m.id) ? 'blocked' : ''}" title="${m.id}">
+              <span class="model-chip-dot"></span>
+              <span class="model-chip-name">${this.esc(m.id)}</span>
+              ${m.credit != null ? `<span class="model-chip-cost" title="${T('creditPerCall')}">${m.credit}${T('creditUnit')}</span>` : `<span class="model-chip-cost" style="color:var(--text-dim);background:transparent;border-color:var(--border)">—</span>`}
+            </div>`).join('')}
+          </div>
+        </div>`;
+      }).join('');
+
+    // Plan dates
+    let trialDaysLeft = null;
+    if (us.trialEndMs) trialDaysLeft = Math.max(0, Math.ceil((us.trialEndMs - Date.now()) / 86400000));
+
+    return `
+    <div class="account-detail-wrap">
+      <div class="detail-grid">
+        <div class="detail-card">
+          <div class="detail-card-head"><span class="dot"></span>${T('plan.title')}</div>
+          <div class="detail-kv">
+            <span class="k">${T('plan.name')}</span><span class="v"><b>${this.esc(cr.planName || us.planName || '—')}</b></span>
+            <span class="k">${T('plan.tier')}</span><span class="v"><span class="tier ${this.esc(a.tier || 'unknown')}" style="padding:1px 8px;font-size:10px">${this.esc(a.tier || 'unknown')}</span>${a.tierManual ? ' <span style="color:var(--text-dim);font-size:10px">✎ manual</span>' : ''}</span>
+            <span class="k">${T('plan.start')}</span><span class="v">${fmtDate(cr.planStart || us.planStart)}</span>
+            <span class="k">${T('plan.end')}</span><span class="v">${fmtDate(cr.planEnd || us.planEnd)}${trialDaysLeft != null ? ` <span style="color:${trialDaysLeft <= 3 ? 'var(--error)' : 'var(--text-dim)'};font-size:11px">(${trialDaysLeft}d left)</span>` : ''}</span>
+            ${cr.overageBalance != null ? `<span class="k">${T('plan.overage')}</span><span class="v">$${cr.overageBalance.toFixed(4)}</span>` : ''}
+          </div>
+        </div>
+
+        <div class="detail-card">
+          <div class="detail-card-head"><span class="dot" style="background:var(--warn);box-shadow:0 0 6px var(--warn)"></span>${T('quota.title')}</div>
+          ${renderBar(T('quota.daily'), cr.dailyPercent, cr.dailyResetAt, I18n.t('creditsBar.dailyNA'))}
+          ${renderBar(T('quota.weekly'), cr.weeklyPercent, cr.weeklyResetAt, I18n.t('creditsBar.weeklyNA'))}
+          <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)" class="detail-kv">
+            ${cr.prompt?.limit ? `<span class="k">${T('quota.promptCredits')}</span><span class="v"><b>${cr.prompt.remaining ?? 0}</b> / ${cr.prompt.limit} <span style="color:var(--text-dim);font-size:10px">(${T('quota.used')} ${cr.prompt.used ?? 0})</span></span>` : `<span class="k">${T('quota.promptCredits')}</span><span class="v" style="color:var(--text-dim)">${T('quota.notApplicable')}</span>`}
+            ${cr.flex?.limit ? `<span class="k">${T('quota.flexCredits')}</span><span class="v"><b>${cr.flex.remaining ?? 0}</b> / ${cr.flex.limit} <span style="color:var(--text-dim);font-size:10px">(${T('quota.used')} ${cr.flex.used ?? 0})</span></span>` : `<span class="k">${T('quota.flexCredits')}</span><span class="v" style="color:var(--text-dim)">${T('quota.notApplicable')}</span>`}
+            <span class="k">${T('quota.fetchedAt')}</span><span class="v">${fmtAgo(cr.fetchedAt)}</span>
+          </div>
+        </div>
+
+        <div class="detail-card" style="grid-column:1/-1">
+          <div class="detail-card-head">
+            <span class="dot" style="background:var(--success);box-shadow:0 0 6px var(--success)"></span>
+            ${T('models.title')}
+            <span style="color:var(--text-dim);font-weight:400;font-size:11px;margin-left:6px">${availCount} / ${tierModels.length} ${T('models.available')}${blocked.size > 0 ? ` · ${blocked.size} ${T('models.blocked')}` : ''}</span>
+            <div style="margin-left:auto;display:flex;gap:4px">
+              <button class="btn btn-ghost btn-xs" onclick="App.openBlockedModal('${this.escJsAttr(a.id)}')" style="font-size:10px">${I18n.t('account.editModels')}</button>
+            </div>
+          </div>
+          ${tierModels.length === 0 ? `<div style="color:var(--text-dim);font-size:12px;padding:10px 0">${I18n.t('toast.noTierModels')}</div>` : modelGroupsHtml}
+        </div>
+
+        <div class="detail-card" style="grid-column:1/-1">
+          <div class="detail-card-head"><span class="dot" style="background:var(--info);box-shadow:0 0 6px var(--info)"></span>${T('runtime.title')}</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:20px">
+            <div class="detail-kv">
+              <span class="k">${T('runtime.status')}</span><span class="v"><span class="badge ${a.status}">${a.status}</span>${a.rateLimited ? ` <span class="badge warn">${I18n.t('card.rateLimit.badge')}</span>` : ''}</span>
+              <span class="k">${T('runtime.errors')}</span><span class="v" style="color:${a.errorCount > 0 ? 'var(--error)' : 'inherit'}">${a.errorCount || 0}</span>
+              <span class="k">${T('runtime.rpm')}</span><span class="v">${a.rpmUsed ?? 0} / ${a.rpmLimit ?? 0}</span>
+            </div>
+            <div class="detail-kv">
+              <span class="k">${T('runtime.lastUsed')}</span><span class="v">${fmtAgo(a.lastUsed)}</span>
+              <span class="k">${T('runtime.lastProbed')}</span><span class="v">${fmtAgo(a.lastProbed || a.userStatusLastFetched)}</span>
+              <span class="k">${T('runtime.creditsFetched')}</span><span class="v">${fmtAgo(cr.fetchedAt)}</span>
+            </div>
+            <div class="detail-kv">
+              <span class="k">${T('runtime.accountId')}</span><span class="v"><code>${a.id}</code></span>
+              <span class="k">${T('runtime.apiKey')}</span><span class="v"><code style="cursor:pointer" onclick="App.copyKey('${this.escJsAttr(a.apiKey)}')" title="${I18n.t('action.copyTitle')}">${a.keyPrefix}</code></span>
+              ${cr.lastError ? `<span class="k">${T('runtime.lastError')}</span><span class="v" style="color:var(--error);font-size:11px">${this.esc(cr.lastError).slice(0, 80)}</span>` : ''}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
   },
 
   async refreshCredits(id) {
@@ -3132,18 +3828,86 @@ const App = {
   },
 
   // ─── Stats ───────────────────────────────────
-  statsRange: 24,
+  statsRange: 24,            // number of hours, or 'all', or 'custom'
+  statsCustomRange: null,    // { start: Date, end: Date } when range='custom'
+  statsChartType: 'bar',
+  statsMetrics: { requests: true, success: true, errors: true },
+  _lastStatsData: null,
+  // Softer, more cohesive palette — indigo / emerald / rose
+  _chartColors: {
+    requests: '#818cf8',   // indigo-400
+    success:  '#34d399',   // emerald-400
+    errors:   '#fb7185',   // rose-400
+  },
+  _pieColors: ['#818cf8', '#34d399', '#fb7185', '#fbbf24', '#60a5fa', '#c084fc', '#22d3ee', '#f472b6'],
 
-  setStatsRange(hours) {
-    this.statsRange = hours;
+  setStatsRange(value) {
+    this.statsRange = value;
+    this.statsCustomRange = null;
     document.querySelectorAll('.stats-range-btn').forEach(b => {
-      b.classList.toggle('active', Number(b.dataset.range) === hours);
+      b.classList.toggle('active', String(b.dataset.range) === String(value));
     });
-    this.loadStats();
+    this.closeCustomRange();
+    if (this._lastStatsData) this.renderMainChart(this._lastStatsData);
+  },
+
+  openCustomRange() {
+    const popup = document.getElementById('custom-range-popup');
+    if (!popup) return;
+    popup.style.display = 'block';
+    // Default to last 7 days
+    const end = new Date();
+    const start = new Date(end.getTime() - 7 * 86400_000);
+    const fmt = d => d.toISOString().slice(0, 10);
+    const sEl = document.getElementById('range-start');
+    const eEl = document.getElementById('range-end');
+    if (sEl && !sEl.value) sEl.value = fmt(start);
+    if (eEl && !eEl.value) eEl.value = fmt(end);
+    document.querySelectorAll('.stats-range-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.range === 'custom');
+    });
+  },
+
+  closeCustomRange() {
+    const popup = document.getElementById('custom-range-popup');
+    if (popup) popup.style.display = 'none';
+  },
+
+  applyCustomRange() {
+    const sEl = document.getElementById('range-start');
+    const eEl = document.getElementById('range-end');
+    if (!sEl?.value || !eEl?.value) { this.toast(I18n.t('range.customStart'), 'error'); return; }
+    const start = new Date(sEl.value + 'T00:00:00');
+    const end = new Date(eEl.value + 'T23:59:59');
+    if (isNaN(start) || isNaN(end) || start > end) { this.toast('Invalid range', 'error'); return; }
+    this.statsRange = 'custom';
+    this.statsCustomRange = { start, end };
+    this.closeCustomRange();
+    document.querySelectorAll('.stats-range-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.range === 'custom');
+    });
+    if (this._lastStatsData) this.renderMainChart(this._lastStatsData);
+  },
+
+  setChartType(type) {
+    this.statsChartType = type;
+    document.querySelectorAll('.stats-type-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.type === type);
+    });
+    if (this._lastStatsData) this.renderMainChart(this._lastStatsData);
+  },
+
+  toggleChartMetric(metric) {
+    const m = this.statsMetrics;
+    const tryOff = { ...m, [metric]: !m[metric] };
+    if (!tryOff.requests && !tryOff.success && !tryOff.errors) return;
+    this.statsMetrics = tryOff;
+    if (this._lastStatsData) this.renderMainChart(this._lastStatsData);
   },
 
   async loadStats() {
     const d = await this.api('GET', '/stats');
+    this._lastStatsData = d;
     const totalReq = d.totalRequests || 0;
     const successRate = totalReq > 0 ? ((d.successCount/totalReq)*100).toFixed(1) : '0.0';
     const allP95 = Object.values(d.modelCounts || {})
@@ -3160,7 +3924,6 @@ const App = {
     `;
 
     const models = d.modelCounts || {};
-    // sort by requests desc
     const sortedModels = Object.entries(models).sort(([,a],[,b]) => b.requests - a.requests);
     const tbody = document.querySelector('#model-stats-table tbody');
     tbody.innerHTML = sortedModels.map(([m, s]) => {
@@ -3179,7 +3942,6 @@ const App = {
       </tr>`;
     }).join('') || `<tr class="empty-row"><td colspan="8">${I18n.t('table.empty.noRequestData')}</td></tr>`;
 
-    // Account breakdown
     const accounts = d.accountCounts || {};
     const sortedAccts = Object.entries(accounts).sort(([,a],[,b]) => b.requests - a.requests);
     const acctBody = document.querySelector('#account-stats-table tbody');
@@ -3196,17 +3958,570 @@ const App = {
       }).join('') || `<tr class="empty-row"><td colspan="5">${I18n.t('table.empty.noAccountRequestData')}</td></tr>`;
     }
 
-    // Time-range chart
-    const buckets = (d.hourlyBuckets || []).slice(-this.statsRange);
-    const maxReq = Math.max(1, ...buckets.map(b => b.requests));
-    document.getElementById('stats-chart').innerHTML = buckets.map(b => {
-      const h = Math.max(2, (b.requests / maxReq) * 100);
-      const errRate = b.requests > 0 ? ((b.errors / b.requests) * 100).toFixed(0) : '0';
-      const hr = new Date(b.hour).getHours();
-      return `<div class="bar-wrap"><div class="bar-tooltip"><b>${hr}:00</b><br>${b.requests} ${I18n.t('table.header.requests')} · ${b.errors} ${I18n.t('table.header.errors')} (${errRate}%)</div><div class="bar ${b.errors > 0 ? 'has-errors' : ''}" style="height:${h}%"></div><div class="bar-label">${hr}${I18n.t('time.hour')}</div></div>`;
-    }).join('') || `<div class="text-sm text-dim" style="text-align:center;width:100%;padding:30px">${I18n.t('table.empty.noData')}</div>`;
+    this.renderMainChart(d);
+    this.renderModelPie(d);
 
     this.poll('stats', () => this.loadStats(), 30000);
+  },
+
+  _setupCanvas(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.scale(dpr, dpr);
+    return { ctx, W: rect.width, H: rect.height };
+  },
+
+  _filterBuckets(raw) {
+    const all = (raw || []).map(b => ({
+      hour: b.hour,
+      t: new Date(b.hour).getTime(),
+      requests: b.requests || 0,
+      errors: b.errors || 0,
+      success: Math.max(0, (b.requests || 0) - (b.errors || 0)),
+    }));
+    if (this.statsRange === 'custom' && this.statsCustomRange) {
+      const { start, end } = this.statsCustomRange;
+      return all.filter(b => b.t >= start.getTime() && b.t <= end.getTime());
+    }
+    if (this.statsRange === 'all' || this.statsRange === -1) return all;
+    const n = Number(this.statsRange);
+    return all.slice(-n);
+  },
+
+  // Aggregate contiguous buckets so the chart stays readable when we have
+  // hundreds of data points (e.g. 30d = 720 hourly buckets).
+  _downsample(buckets, maxPoints) {
+    if (buckets.length <= maxPoints) return buckets;
+    const step = Math.ceil(buckets.length / maxPoints);
+    const out = [];
+    for (let i = 0; i < buckets.length; i += step) {
+      const g = buckets.slice(i, i + step);
+      const mid = g[Math.floor(g.length / 2)];
+      out.push({
+        hour: mid.hour,
+        t: mid.t,
+        requests: g.reduce((a, b) => a + b.requests, 0),
+        errors:   g.reduce((a, b) => a + b.errors,   0),
+        success:  g.reduce((a, b) => a + b.success,  0),
+      });
+    }
+    return out;
+  },
+
+  // Catmull-Rom → Bezier spline. Set move=false to continue the current
+  // sub-path (important for area fills where we start from the baseline).
+  _smoothPath(ctx, points, move = true) {
+    if (points.length < 1) return;
+    if (move) ctx.moveTo(points[0].x, points[0].y);
+    else ctx.lineTo(points[0].x, points[0].y);
+    for (let i = 0; i < points.length - 1; i++) {
+      const p0 = points[i - 1] || points[i];
+      const p1 = points[i];
+      const p2 = points[i + 1];
+      const p3 = points[i + 2] || p2;
+      const tension = 0.28;
+      const cp1x = p1.x + (p2.x - p0.x) * tension;
+      const cp1y = p1.y + (p2.y - p0.y) * tension;
+      const cp2x = p2.x - (p3.x - p1.x) * tension;
+      const cp2y = p2.y - (p3.y - p1.y) * tension;
+      ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+  },
+
+  renderMainChart(d) {
+    const canvas = document.getElementById('stats-canvas');
+    const legend = document.getElementById('stats-legend');
+    const rangeIndicator = document.getElementById('stats-range-indicator');
+    if (!canvas) return;
+
+    let buckets = this._filterBuckets(d.hourlyBuckets);
+    const MAX_POINTS = 160;
+    const originalLength = buckets.length;
+    buckets = this._downsample(buckets, MAX_POINTS);
+
+    const { ctx, W, H } = this._setupCanvas(canvas);
+
+    if (rangeIndicator) {
+      const rangeText = this._rangeLabel(originalLength, buckets.length);
+      rangeIndicator.textContent = rangeText;
+      rangeIndicator.style.display = rangeText ? 'block' : 'none';
+    }
+
+    if (buckets.length < 1) {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = 'rgba(255,255,255,.25)';
+      ctx.font = '500 13px var(--font), sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(I18n.t('table.empty.noData'), W / 2, H / 2);
+      if (legend) legend.innerHTML = '';
+      this._chartState = null;
+      this._chartHitMap = null;
+      return;
+    }
+
+    const pad = { t: 18, r: 14, b: 30, l: 44 };
+    const cW = W - pad.l - pad.r, cH = H - pad.t - pad.b;
+    const step = buckets.length > 1 ? cW / (buckets.length - 1) : cW;
+    const slotW = buckets.length > 1 ? cW / buckets.length : cW;
+    const m = { ...this.statsMetrics };
+    const type = this.statsChartType;
+
+    let maxY;
+    if (type === 'stacked') {
+      maxY = Math.max(1, ...buckets.map(b => (m.success ? b.success : 0) + (m.errors ? b.errors : 0) || (m.requests ? b.requests : 0)));
+    } else if (type === 'bar') {
+      maxY = Math.max(1, ...buckets.map(b => b.requests));
+    } else {
+      const vals = [];
+      if (m.requests) vals.push(...buckets.map(b => b.requests));
+      if (m.success)  vals.push(...buckets.map(b => b.success));
+      if (m.errors)   vals.push(...buckets.map(b => b.errors));
+      maxY = Math.max(1, ...vals);
+    }
+    const niceY = (n) => {
+      const exp = Math.pow(10, Math.floor(Math.log10(n)));
+      const frac = n / exp;
+      const fr = frac <= 1 ? 1 : frac <= 2 ? 2 : frac <= 2.5 ? 2.5 : frac <= 5 ? 5 : 10;
+      return fr * exp;
+    };
+    maxY = niceY(maxY);
+
+    const xAt = (i) => buckets.length > 1 ? pad.l + i * step : pad.l + cW / 2;
+    const yAt = (v) => pad.t + cH - (v / maxY) * cH;
+
+    // Persist state — hit-map uses final coords so tooltip works during animation
+    this._chartState = { ctx, W, H, buckets, pad, cH, cW, slotW, step, maxY, m, type, xAt, yAt };
+    this._chartHitMap = { buckets, xAt, yAt, pad, cH, slotW, W, H };
+
+    // Bind hover tooltip once
+    this._bindChartHover();
+
+    // Animate: paint repeatedly with 0 → 1 progress
+    cancelAnimationFrame(this._chartAnim || 0);
+    const start = performance.now();
+    const dur = 480;
+    const loop = (now) => {
+      const t = Math.min(1, (now - start) / dur);
+      const p = 1 - Math.pow(1 - t, 3); // ease-out cubic
+      this._paintChart(p);
+      if (t < 1) this._chartAnim = requestAnimationFrame(loop);
+    };
+    this._chartAnim = requestAnimationFrame(loop);
+
+    // Legend with totals (drawn once, doesn't animate)
+    if (legend) {
+      const totals = {
+        requests: buckets.reduce((a, b) => a + b.requests, 0),
+        success: buckets.reduce((a, b) => a + b.success, 0),
+        errors: buckets.reduce((a, b) => a + b.errors, 0),
+      };
+      const items = [
+        { key: 'requests', label: I18n.t('section.requestChart.legendRequests'), color: this._chartColors.requests },
+        { key: 'success', label: I18n.t('section.requestChart.legendSuccess'), color: this._chartColors.success },
+        { key: 'errors', label: I18n.t('section.requestChart.legendErrors'), color: this._chartColors.errors },
+      ];
+      legend.innerHTML = items.map(it => `
+        <div class="chart-legend-item ${m[it.key] ? '' : 'muted'}" onclick="App.toggleChartMetric('${it.key}')">
+          <span class="chart-legend-swatch dot" style="background:${it.color}"></span>
+          <span>${it.label}</span>
+          <span class="chart-legend-value">${totals[it.key]}</span>
+        </div>
+      `).join('');
+    }
+  },
+
+  _paintChart(progress) {
+    const s = this._chartState;
+    if (!s) return;
+    const { ctx, W, H, buckets, pad, cH, cW, slotW, maxY, m, type, xAt, yAt } = s;
+    const p = progress;
+
+    ctx.clearRect(0, 0, W, H);
+
+    // Background gradient fade for the plot area — very subtle
+    const bgGrad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+    bgGrad.addColorStop(0, 'rgba(129,140,248,.02)');
+    bgGrad.addColorStop(1, 'rgba(129,140,248,0)');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(pad.l, pad.t, cW, cH);
+
+    // Horizontal grid (dashed)
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,.045)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 4]);
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + (cH / 4) * i;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(W - pad.r, y);
+      ctx.stroke();
+    }
+    ctx.restore();
+
+    // Y-axis labels
+    ctx.fillStyle = 'rgba(255,255,255,.38)';
+    ctx.font = '500 10px "JetBrains Mono", "Consolas", monospace';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const v = Math.round(maxY * (4 - i) / 4);
+      const y = pad.t + (cH / 4) * i;
+      ctx.fillText(this._fmtNum(v), pad.l - 10, y);
+    }
+
+    const base = pad.t + cH;
+
+    const drawSmoothSeries = (values, color, opts = {}) => {
+      // Animate: lerp each y from the baseline toward target by progress.
+      const points = values.map((v, i) => {
+        const targetY = yAt(v);
+        return { x: xAt(i), y: base + (targetY - base) * p };
+      });
+      if (points.length < 1) return;
+      if (opts.fill && points.length >= 2) {
+        const grad = ctx.createLinearGradient(0, pad.t, 0, pad.t + cH);
+        grad.addColorStop(0, color + '4d');
+        grad.addColorStop(1, color + '00');
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, base);
+        this._smoothPath(ctx, points, false);
+        ctx.lineTo(points[points.length - 1].x, base);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = opts.thin ? 1.5 : 2.25;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      if (opts.dash) ctx.setLineDash([5, 4]);
+      ctx.shadowColor = color;
+      ctx.shadowBlur = opts.fill ? 8 : 4;
+      ctx.beginPath();
+      if (points.length >= 2) {
+        this._smoothPath(ctx, points);
+      } else {
+        ctx.moveTo(points[0].x, points[0].y);
+      }
+      ctx.stroke();
+      ctx.restore();
+      // Data points — only when not too dense, on nonzero, and only after
+      // the growth animation is far enough along so dots don't pop.
+      if (points.length <= 80 && p > 0.6) {
+        const dotOpacity = Math.min(1, (p - 0.6) / 0.4);
+        ctx.save();
+        ctx.globalAlpha = dotOpacity;
+        points.forEach((pt, i) => {
+          if (values[i] === 0) return;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#09090b';
+          ctx.fill();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 1.8;
+          ctx.stroke();
+        });
+        ctx.restore();
+      }
+    };
+
+    const drawBars = () => {
+      const gap = Math.min(3, slotW * 0.2);
+      const barW = Math.max(2, slotW - gap);
+      buckets.forEach((b, i) => {
+        const v = b.requests;
+        if (v === 0) return;
+        const h = (v / maxY) * cH * p; // animate height
+        const errRatio = v > 0 ? b.errors / v : 0;
+        const color = this._errorTintedColor(errRatio);
+        const x = xAt(i) - barW / 2;
+        const y = base - h;
+        const grad = ctx.createLinearGradient(0, y, 0, y + h);
+        grad.addColorStop(0, color);
+        grad.addColorStop(1, color + 'cc');
+        ctx.fillStyle = grad;
+        const rr = Math.min(barW / 2, 3);
+        this._roundRect(ctx, x, y, barW, h, rr);
+        ctx.fill();
+        if (barW > 4 && h > 2) {
+          ctx.fillStyle = 'rgba(255,255,255,.1)';
+          this._roundRect(ctx, x, y, barW, Math.min(2, h), rr);
+          ctx.fill();
+        }
+      });
+    };
+
+    const drawStacked = () => {
+      const gap = Math.min(3, slotW * 0.2);
+      const barW = Math.max(2, slotW - gap);
+      buckets.forEach((b, i) => {
+        const cx = xAt(i);
+        let stackV = 0;
+        const segments = [];
+        if (m.success && b.success > 0) segments.push({ v: b.success, color: this._chartColors.success });
+        if (m.errors  && b.errors  > 0) segments.push({ v: b.errors,  color: this._chartColors.errors  });
+        if (!segments.length && m.requests && b.requests > 0) segments.push({ v: b.requests, color: this._chartColors.requests });
+        segments.forEach((seg, si) => {
+          const segBottomY = base - (stackV / maxY) * cH * p;
+          const segTopY    = base - ((stackV + seg.v) / maxY) * cH * p;
+          const h = segBottomY - segTopY;
+          if (h <= 0) { stackV += seg.v; return; }
+          const isTop = si === segments.length - 1;
+          const rr = Math.min(barW / 2, 3);
+          const grad = ctx.createLinearGradient(0, segTopY, 0, segBottomY);
+          grad.addColorStop(0, seg.color);
+          grad.addColorStop(1, seg.color + 'b3');
+          ctx.fillStyle = grad;
+          if (isTop) {
+            this._roundRectTop(ctx, cx - barW / 2, segTopY, barW, h, rr);
+          } else {
+            ctx.fillRect(cx - barW / 2, segTopY, barW, h);
+          }
+          ctx.fill();
+          stackV += seg.v;
+        });
+      });
+    };
+
+    // Render by type
+    if (type === 'bar') {
+      drawBars();
+    } else if (type === 'stacked') {
+      drawStacked();
+    } else {
+      // area / line
+      const fill = type === 'area';
+      // Order matters: draw success below errors below requests for z-order
+      if (m.success) drawSmoothSeries(buckets.map(b => b.success), this._chartColors.success, { fill: fill, thin: false });
+      if (m.errors)  drawSmoothSeries(buckets.map(b => b.errors),  this._chartColors.errors,  { fill: false, thin: true, dash: false });
+      if (m.requests && type === 'line') drawSmoothSeries(buckets.map(b => b.requests), this._chartColors.requests, { fill: false, thin: false });
+      if (m.requests && type === 'area') drawSmoothSeries(buckets.map(b => b.requests), this._chartColors.requests, { fill: true, thin: false });
+    }
+
+    // X-axis labels — smart step based on time span
+    ctx.fillStyle = 'rgba(255,255,255,.38)';
+    ctx.font = '500 10px "JetBrains Mono", "Consolas", monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const spanHours = buckets.length > 1 ? (buckets[buckets.length - 1].t - buckets[0].t) / 3600_000 : 0;
+    const useDate = spanHours >= 48;
+    const labelCount = Math.min(8, buckets.length);
+    const labelStep = Math.max(1, Math.floor(buckets.length / labelCount));
+    let lastLabel = null;
+    let lastX = -Infinity;
+    const minGapPx = useDate ? 48 : 36;
+    buckets.forEach((b, i) => {
+      if (i % labelStep !== 0 && i !== buckets.length - 1) return;
+      const dt = new Date(b.hour);
+      const txt = useDate
+        ? `${dt.getMonth() + 1}/${dt.getDate()}`
+        : dt.getHours().toString().padStart(2, '0') + ':00';
+      const x = xAt(i);
+      if (txt === lastLabel) return;
+      if (x - lastX < minGapPx && i !== buckets.length - 1) return;
+      lastLabel = txt;
+      lastX = x;
+      ctx.fillText(txt, x, pad.t + cH + 10);
+    });
+  },
+
+  _bindChartHover() {
+    const canvas = document.getElementById('stats-canvas');
+    const tipEl  = document.getElementById('stats-tooltip');
+    if (!canvas || !tipEl || canvas._hoverBound) return;
+    canvas._hoverBound = true;
+    canvas.addEventListener('mousemove', (ev) => {
+      const hm = this._chartHitMap;
+      if (!hm) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      if (x < hm.pad.l || x > hm.W - 8 || y < hm.pad.t || y > hm.pad.t + hm.cH) {
+        tipEl.classList.remove('show');
+        return;
+      }
+      let best = 0, bestD = Infinity;
+      hm.buckets.forEach((_, i) => {
+        const d = Math.abs(hm.xAt(i) - x);
+        if (d < bestD) { bestD = d; best = i; }
+      });
+      const b = hm.buckets[best];
+      const rate = b.requests > 0 ? ((b.success / b.requests) * 100).toFixed(1) : '—';
+      const time = new Date(b.hour).toLocaleString();
+      const c = this._chartColors;
+      tipEl.innerHTML = `
+        <div class="tt-time">${this.esc(time)}</div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.requests}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipRequests')}</span><span class="tt-value">${b.requests}</span></div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.success}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipSuccess')}</span><span class="tt-value">${b.success}</span></div>
+        <div class="tt-row"><span class="tt-dot" style="background:${c.errors}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipErrors')}</span><span class="tt-value">${b.errors}</span></div>
+        <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipRate')}</span><span class="tt-value">${rate}%</span></div>
+      `;
+      tipEl.classList.add('show');
+      const tipRect = tipEl.getBoundingClientRect();
+      let left = hm.xAt(best);
+      const halfW = tipRect.width / 2;
+      left = Math.min(hm.W - halfW - 6, Math.max(halfW + 6, left));
+      const top = hm.pad.t + 4;
+      tipEl.style.left = left + 'px';
+      tipEl.style.top = top + 'px';
+    });
+    canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
+  },
+
+  _roundRect(ctx, x, y, w, h, r) {
+    if (h <= 0 || w <= 0) return;
+    const rr = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  },
+
+  _roundRectTop(ctx, x, y, w, h, r) {
+    if (h <= 0 || w <= 0) return;
+    const rr = Math.min(r, w / 2, h);
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.lineTo(x + w - rr, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+    ctx.lineTo(x + w, y + h);
+    ctx.lineTo(x, y + h);
+    ctx.lineTo(x, y + rr);
+    ctx.quadraticCurveTo(x, y, x + rr, y);
+    ctx.closePath();
+  },
+
+  // Interpolate indigo → amber → rose based on error ratio. Returns hex so
+  // callers can safely append alpha suffixes like '+cc'.
+  _errorTintedColor(ratio) {
+    const clamp01 = (x) => Math.max(0, Math.min(1, x));
+    const r = clamp01(ratio);
+    if (r === 0) return this._chartColors.requests; // indigo
+    const mix = (c1, c2, t) => {
+      const p1 = this._hexToRgb(c1), p2 = this._hexToRgb(c2);
+      const rr = Math.round(p1.r + (p2.r - p1.r) * t);
+      const gg = Math.round(p1.g + (p2.g - p1.g) * t);
+      const bb = Math.round(p1.b + (p2.b - p1.b) * t);
+      const to2 = (n) => n.toString(16).padStart(2, '0');
+      return '#' + to2(rr) + to2(gg) + to2(bb);
+    };
+    if (r <= 0.3) return mix('#818cf8', '#fbbf24', r / 0.3);
+    return mix('#fbbf24', '#fb7185', (r - 0.3) / 0.7);
+  },
+
+  _hexToRgb(h) {
+    const s = h.replace('#', '');
+    return {
+      r: parseInt(s.slice(0, 2), 16),
+      g: parseInt(s.slice(2, 4), 16),
+      b: parseInt(s.slice(4, 6), 16),
+    };
+  },
+
+  _fmtNum(n) {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (n >= 1_000) return (n / 1_000).toFixed(1).replace(/\.0$/, '') + 'k';
+    return String(n);
+  },
+
+  _rangeLabel(originalPts, shownPts) {
+    if (!originalPts) return '';
+    const fmt = (d) => `${d.getMonth()+1}/${d.getDate()}`;
+    if (this.statsRange === 'custom' && this.statsCustomRange) {
+      const { start, end } = this.statsCustomRange;
+      return `${fmt(start)} – ${fmt(end)}  ·  ${originalPts} pts`;
+    }
+    if (this.statsRange === 'all' || this.statsRange === -1) {
+      return `All · ${originalPts} pts`;
+    }
+    const hours = Number(this.statsRange);
+    if (hours <= 72) return `${hours}h · ${originalPts} pts`;
+    const days = Math.round(hours / 24);
+    const note = shownPts < originalPts ? ` (sampled to ${shownPts})` : '';
+    return `${days}d · ${originalPts} pts${note}`;
+  },
+
+  renderModelPie(d) {
+    const canvas = document.getElementById('model-pie-canvas');
+    const legend = document.getElementById('model-pie-legend');
+    if (!canvas) return;
+
+    const entries = Object.entries(d.modelCounts || {})
+      .map(([name, s]) => ({ name, count: s.requests || 0 }))
+      .filter(e => e.count > 0)
+      .sort((a, b) => b.count - a.count);
+
+    const top = entries.slice(0, 8);
+    const others = entries.slice(8).reduce((a, b) => a + b.count, 0);
+    if (others > 0) top.push({ name: 'others', count: others });
+
+    const total = top.reduce((a, b) => a + b.count, 0);
+
+    const { ctx, W, H } = this._setupCanvas(canvas);
+    ctx.clearRect(0, 0, W, H);
+
+    if (total === 0) {
+      ctx.fillStyle = 'rgba(255,255,255,.3)';
+      ctx.font = '13px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(I18n.t('table.empty.noData'), W / 2, H / 2);
+      if (legend) legend.innerHTML = '';
+      return;
+    }
+
+    const cx = W / 2, cy = H / 2;
+    const rOuter = Math.min(W, H) / 2 - 6;
+    const rInner = rOuter * 0.58;
+
+    let angle = -Math.PI / 2;
+    top.forEach((seg, i) => {
+      const frac = seg.count / total;
+      const a2 = angle + frac * Math.PI * 2;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(angle) * rInner, cy + Math.sin(angle) * rInner);
+      ctx.arc(cx, cy, rOuter, angle, a2);
+      ctx.arc(cx, cy, rInner, a2, angle, true);
+      ctx.closePath();
+      ctx.fillStyle = this._pieColors[i % this._pieColors.length];
+      ctx.fill();
+      angle = a2;
+    });
+
+    // Center label
+    ctx.fillStyle = 'var(--text)';
+    ctx.fillStyle = '#f4f4f5';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = '600 22px var(--mono), monospace';
+    ctx.fillText(total, cx, cy - 6);
+    ctx.fillStyle = 'rgba(255,255,255,.4)';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(I18n.t('section.requestChart.legendRequests'), cx, cy + 12);
+
+    if (legend) {
+      legend.innerHTML = top.map((seg, i) => {
+        const pct = (seg.count / total * 100).toFixed(1);
+        return `<div class="pie-legend-item" title="${this.esc(seg.name)}">
+          <span class="pie-legend-dot" style="background:${this._pieColors[i % this._pieColors.length]}"></span>
+          <span class="pie-legend-name">${this.esc(seg.name)}</span>
+          <span class="pie-legend-count">${seg.count}</span>
+          <span class="pie-legend-pct">${pct}%</span>
+        </div>`;
+      }).join('');
+    }
   },
 
   async resetStats() {
@@ -3235,8 +4550,13 @@ const App = {
     const d = await this.api('GET', '/experimental');
     const cb = document.getElementById('exp-cascade-reuse');
     if (cb) cb.checked = !!d.flags?.cascadeConversationReuse;
-    const idCb = document.getElementById('exp-identity-prompt');
-    if (idCb) idCb.checked = !!d.flags?.modelIdentityPrompt;
+    // Reflect current skin cookie in the dropdown so reload state is visible.
+    const skinSel = document.getElementById('skin-select');
+    if (skinSel) {
+      const m = document.cookie.match(/(?:^|;\s*)dashboard_skin=([^;]+)/);
+      const cur = m ? decodeURIComponent(m[1]) : 'modern';
+      skinSel.value = (cur === 'sketch') ? 'sketch' : 'modern';
+    }
     const pool = d.conversationPool || {};
     document.getElementById('exp-pool-cards').innerHTML = `
       <div class="card info">
@@ -3255,12 +4575,6 @@ const App = {
         <div class="card-sub">${I18n.t('card.stores.subtitle', { expired: pool.expired || 0, evicted: pool.evictions || 0 })}</div>
       </div>
     `;
-
-    // Identity prompts editor
-    const ip = await this.api('GET', '/identity-prompts');
-    this._identityDefaults = ip.defaults || {};
-    this._identityPrompts = ip.prompts || {};
-    this.renderIdentityPrompts('');
 
     // System prompts editor
     const sp = await this.api('GET', '/system-prompts');
@@ -3284,57 +4598,6 @@ const App = {
         </div>
       `).join('');
     }
-  },
-
-  renderIdentityPrompts(filter) {
-    const holder = document.getElementById('identity-prompts-editor');
-    if (!holder) return;
-    const prompts = this._identityPrompts || {};
-    const f = (filter || '').toLowerCase();
-    holder.innerHTML = Object.entries(prompts).filter(([p]) => !f || p.includes(f) || (this.PROVIDER_LABELS[p]||'').toLowerCase().includes(f)).map(([provider, text]) => {
-      const label = this.PROVIDER_LABELS[provider] || provider;
-      const isDefault = text === this._identityDefaults[provider];
-      return `
-        <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:var(--surface)">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <div style="display:flex;align-items:center;gap:8px">
-              <code style="color:var(--accent);font-weight:600">${provider}</code>
-              <span class="text-sm text-muted">${label}</span>
-              ${isDefault ? '' : `<span class="text-xs" style="background:var(--accent);color:#fff;padding:2px 6px;border-radius:3px">${I18n.t('card.custom')}</span>`}
-            </div>
-            <div class="btn-group">
-              <button class="btn btn-ghost btn-xs" onclick="App.resetIdentityPrompt('${provider}')" ${isDefault ? 'disabled' : ''}>${I18n.t('experimental.restoreDefault')}</button>
-              <button class="btn btn-primary btn-xs" onclick="App.saveIdentityPrompt('${provider}')">${I18n.t('experimental.save')}</button>
-            </div>
-          </div>
-          <textarea id="id-prompt-${provider}" class="input" rows="3" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical;line-height:1.5">${this.esc(text)}</textarea>
-        </div>
-      `;
-    }).join('') || `<div class="text-muted text-sm">${I18n.t('experimental.noMatch')}</div>`;
-  },
-
-  filterIdentityPrompts(v) { this.renderIdentityPrompts(v); },
-
-  async saveIdentityPrompt(provider) {
-    const ta = document.getElementById(`id-prompt-${provider}`);
-    if (!ta) return;
-    const v = ta.value.trim();
-    if (!v) return this.toast(I18n.t('experimental.promptEmpty'), 'error');
-    if (!v.includes('{model}')) {
-      const ok = await this.confirm(I18n.t('experimental.missingPlaceholder'), I18n.t('experimental.missingPlaceholderDesc') || 'Save anyway?', { okText: I18n.t('button.save') });
-      if (!ok) return;
-    }
-    await this.api('PUT', '/identity-prompts', { [provider]: v });
-    this.toast(`${provider} ${I18n.t('toast.saved')}`, 'success');
-    this.loadExperimental();
-  },
-
-  async resetIdentityPrompt(provider) {
-    const ok = await this.confirm(I18n.t('experimental.restoreDefault'), `${provider} ${I18n.t('confirm.restoreDefaultDesc') || 'restore to default?'}`, { okText: I18n.t('experimental.restoreDefault') });
-    if (!ok) return;
-    await this.api('DELETE', `/identity-prompts/${provider}`);
-    this.toast(`${provider} ${I18n.t('experimental.restored') || 'restored'}`, 'success');
-    this.loadExperimental();
   },
 
   async saveSystemPrompt(key) {
@@ -3398,6 +4661,15 @@ const App = {
     const r = await this.api('DELETE', '/experimental/conversation-pool');
     this.toast(`${I18n.t('toast.cleared')} ${r.cleared || 0}`, 'success');
     this.loadExperimental();
+  },
+
+  // ─── Console skin (default ↔ experimental sketch UI) ────────
+  switchSkin(skin) {
+    const next = skin === 'sketch' ? 'sketch' : 'modern';
+    // Year-long cookie, lax samesite. path=/ so /dashboard sees it.
+    const oneYear = 365 * 24 * 3600;
+    document.cookie = `dashboard_skin=${next}; path=/; max-age=${oneYear}; samesite=lax`;
+    location.reload();
   },
 
   // ─── Ban Detection ───────────────────────────
@@ -3477,20 +4749,137 @@ const App = {
   // new PR lands; the dashboard Credits panel renders straight from this.
   CONTRIBUTORS: [
     {
+      login: 'baily-zhang',
+      pr: 62,
+      weight: 'S+',
+      weightLabel: '第四次出手 · dashboard inline-script 静态解析 regression 防御',
+      mergedAt: '2026-04-25',
+      title: 'fix(dashboard): 修复 Credits 文案导致控制台空白',
+      summary: 'commit 60fcd5a 写新 Credits 文案时 Codeium 那个所有格在 inline single-quoted JS string 里被过度转义，整个 dashboard 主脚本 parse fail —— 页面能开但 stats / accounts 等 panel 全空白。几小时内发现修字面 + 新加 test/dashboard-syntax.test.js 用 V8 静态解析 inline script blocks，未来同类 escape / copy 错误下次直接卡 npm test 阶段，比 live UI 砖掉强。',
+    },
+    {
+      login: 'baily-zhang',
+      pr: 61,
+      weight: 'S+',
+      weightLabel: '第三次出手 + Opus 4.7 多模态体验救星',
+      mergedAt: '2026-04-25',
+      title: 'fix: 修复 Opus 4.7 Claude Code 上下文爆炸',
+      summary: 'Claude Code 走 Opus 4.7 + 图片 + tools 时反代把整个 Claude Code system prompt（含 billing header）+ 工具 fallback + 图片 base64 全塞进 user 文本通道，连续图片轮历史指数膨胀触发 Opus 4.7 prompt-injection 拒答。修法五件事：图片 / 二进制 block 在历史里只留占位符不再嵌 base64；Claude Code 长 system prompt 压缩去除 billing header；Opus 4.7 多模态工具请求禁用 user-message tool fallback（proto 层 SectionOverride 已经 carry 工具）；Opus 4.7 工具请求启用窄范围 cascade reuse + 严格账号绑定避免 retry 全量重放；fingerprint 不再 hash 图片 base64。回归测试覆盖每一条。和 PR #36 / #45 合起来 baily-zhang 已是反代复用机制的实质 maintainer。',
+    },
+    {
+      login: 'abwuge',
+      pr: 58,
+      weight: 'B+',
+      weightLabel: 'Docker 部署关键修复 · 首次贡献',
+      mergedAt: '2026-04-25',
+      title: 'fix: nginx shared memory zone + 缺失的 join import',
+      summary: '新人首次贡献就解了部署死锁。docker-compose 起来后所有 windsurf 容器（windsurf-lb + 三个 API 副本）持续 Restart：nginx upstream 用了 `server windsurf-api:3003 resolve` 动态解析但没配 `zone`，nginx 直接拒绝启动；Node 这边 src/config.js:38 实际调用 `join()` 但顶部 import 漏写，replica-data-dir 路径 hit 时 ReferenceError 进程崩。两处单行修，docker compose 立刻能起。PR 描述里那句"~~这么简单的问题，难道没人用 docker 吗？~~" 本人勿删。',
+    },
+    {
+      login: 'aict666',
+      pr: 54,
+      weight: 'S+',
+      weightLabel: '第四次出手 · 三件事打包修',
+      mergedAt: '2026-04-25',
+      title: 'fix: bring Claude Code tool-call flow back to Anthropic-equivalent behaviour',
+      summary: '一个 PR 解了三个独立 regression。① tool preamble 从 1600 字符瘦身到 330 字符 —— 老版本的 ### Tool / parameters schema: / ```json {…} 形态正是 Claude Code 自家 system prompt 的指纹，出现在 user 槽位时 Opus 4.7 会判 "pasted system prompt" 拒答。② redact 标记升到第 6 代单字符 U+2026 省略号 `…`：第 5 代 redacted internal path 仍被 Opus 塞进 cd redacted internal path && git ... 浪费 2-3 turn；新 marker 0 ASCII word char + 0 shell 元字符 + 训练数据里没 cd … 当真路径的样本，模型不会再当参数用。③ neutralizeCascadeIdentity 加 5 个新 pattern（Cascade is an? AI assistant / As Cascade / Codeium\'s Cascade / built by Codeium / Cascade\'s workspace），漏网的 Cascade 自称口吻全部封死。回归套装含 banned-shape regex 锁死未来不会再倒退到含 ASCII 字符的 marker。',
+    },
+    {
+      login: 'aict666',
+      pr: 53,
+      weight: 'S+',
+      weightLabel: '第二次出手 · redact marker shell 安全',
+      mergedAt: '2026-04-24',
+      title: 'fix(#24): redact marker must have no shell metacharacters',
+      summary: '第 4 代 redact marker `(internal path redacted)` 被 Opus 4.7 塞进 `cd (internal path redacted) && git branch -a`，zsh 把 `(…)` 解析成 glob-qualifier 报 `unknown file attribute: i`，模型见到这种诡异错误就 derail。aict666 的根因诊断细到 zsh 的 glob qualifier 词法 —— 一个文件 API 安全的 marker 不一定是 shell 安全的。换成 `redacted internal path`（无 shell 元字符 / 无路径形状），加两条 banned regex 锁死 marker 形状，未来若再出新 marker test 会卡住。',
+    },
+    {
+      login: 'aict666',
+      pr: 51,
+      weight: 'S+',
+      weightLabel: '最高信任级别：root-cause 精准、测试齐全、诊断可追溯',
+      mergedAt: '2026-04-24',
+      title: 'fix: 重写 tool preamble 去 jailbreak 措辞，绕过 Opus 4.7 injection guard',
+      summary: 'Opus-class 模型走 /v1/messages 时完全不 emit <tool_call>，直接回复"The pasted content appears to be a prompt-injection attempt"。root cause 精确到 TOOL_PROTOCOL_HEADER 里三段越狱措辞（IGNORE any earlier / For THIS request only / [Tool-calling context] 栅栏）被 Opus 自己的 injection detector 反杀。重写成中性的 "The following functions are available for this turn"，保留 <tool_call> 协议合同与 parser 不动，附带 3 条 banned-regex 回归测试防止未来倒退。PR body 可以直接发 Anthropic 论坛。',
+    },
+    {
+      login: 'baily-zhang',
+      pr: 45,
+      weight: 'S',
+      weightLabel: '根因修复：上下文重放 / usage 累加',
+      mergedAt: '2026-04-24',
+      title: 'fix: 切断 Cascade 复用时的旧 step 重放（alpha→alphabeta→alphabeta…）',
+      summary: '复用 cascade_id 时 GetCascadeTrajectorySteps 每次都从 step 0 拉，结果旧 step 的 assistant text 被重放到新轮里，输出变成 "alpha" → "alphabeta" → "alphabetabeta"；usage 也累加成整条 cascade 的总量。修法是把 stepOffset / generatorOffset 随 pool entry 持久化，每次复用时从上次的 offset 继续拉。给 PR #36 之后仍报胡言乱语的用户找回最后一块拼图。',
+    },
+    {
+      login: 'aict666',
+      pr: 44,
+      weight: 'S+',
+      weightLabel: '账号 tier 识别的关键修复',
+      mergedAt: '2026-04-24',
+      title: 'fix(auth): 阻止 non-premium 调用把 Pro/Trial 降级为 free',
+      summary: 'updateCapability 在每次成功 chat 后无条件 inferTier() 覆写 account.tier。inferTier 只认 claude-opus-4.6 / sonnet-4.6 作为 Pro 证据，Pro 账号只要调用 gemini-2.5-flash 或 gpt-4o-mini 一次就被悄悄降级到 free，后续请求按 free 限制，Dashboard 显示 FREE。修法是当 GetUserStatus 已经给过权威 tier（userStatusLastFetched > 0 或 tierManual=true）时跳过 inferTier 回退。probeAccount 原本有手动 restore 工作绕过，chat handler 路径没有，每个真实 API 调用都在偷偷降级账号。',
+    },
+    {
+      login: 'smeinecke',
+      pr: 43,
+      weight: 'A',
+      weightLabel: '国际化基础设施贡献者',
+      mergedAt: '2026-04-24',
+      title: 'feat: Dashboard 完整 i18n 国际化',
+      summary: '14 个 commit 把所有硬编码中文改成 I18n.t() 调用，补齐 en.json / zh-CN.json 缺键，加 check-i18n.js 扫 JavaScript 里的 I18n.t() key 确保 locale 里都有对应翻译。让 Dashboard 真正能中英双语切换，不是翻了一半的半成品。',
+    },
+    {
+      login: 'baily-zhang',
+      pr: 36,
+      weight: 'S',
+      weightLabel: '上下文丢失根因修复者',
+      mergedAt: '2026-04-22',
+      title: 'fix: fingerprint 只 hash 稳定轮，消除 0% 复用命中',
+      summary: 'Claude Code 每次重构 assistant content（数组 ↔ 字符串 ↔ 含 tool_use blocks）而 system prompt 又含动态项目状态，老 fingerprint 把这两者 hash 进去导致永不匹配。改成只 hash user + tool_result 两类稳定轮，system prompt 通过 CASCADE_REUSE_HASH_SYSTEM=1 opt-in。外加可配置历史 budget（1m 模型更大默认）+ LS_DATA_DIR override。#24 "胡言乱语"爆发后的第一块拼图，和 PR #45 合起来算这条线上最彻底的修复。',
+    },
+    {
+      login: 'youfak',
+      pr: 26,
+      weight: 'A+',
+      weightLabel: '部署体验贡献者：Docker 零依赖适配',
+      mergedAt: '2026-04-22',
+      title: 'feat: Docker 全套部署 + DATA_DIR + LS 重启兜底',
+      summary: 'Dockerfile / docker-compose.yml / .dockerignore / .gitattributes 一整套，配 DATA_DIR 配置项把 accounts.json / stats.json / logs/ 等持久化文件统一收敛到可挂载的数据目录。附带修两个 LS 稳定性问题：Windows 宿主机构建时 install-ls.sh 的 CRLF 会导致容器内 set: pipefail 报错；Dashboard 点重启 LS 时若启动失败会把整个 Node 进程打崩。',
+    },
+    {
+      login: 'motto1',
+      pr: 20,
+      weight: 'A',
+      weightLabel: '登录取号链路还原',
+      mergedAt: '2026-04-21',
+      title: 'fix(dashboard): 补上 Windsurf 官网实际使用的 Auth1 登录链路',
+      summary: '官网可以登但 Dashboard 登录失败 —— 原因是旧 Firebase 路径已不是主链路。逆向补出 /_devin-auth/connections → /_devin-auth/password/login → WindsurfPostAuth → GetOneTimeAuthToken 四步流程，保留旧 Firebase 作为兜底，再顺手加了邮箱/密码批量导入 + 剪贴板读取。',
+    },
+    {
       login: 'dd373156',
       pr: 1,
+      weight: 'B+',
+      weightLabel: '首位外部 PR 贡献者',
       mergedAt: '2026-04-20',
-      title: 'fix(models): make pro tier include dynamically merged cloud models',
-      summary: '发现 Pro 层级只看到硬编码的模型清单，拉自云端的动态扩展模型没合并进 tier 表，导致 Cursor / Cherry Studio 等客户端在 Pro 账号下也看不见最新上线的模型。修了 mergeCloudModels 的合并路径，让云端扩展模型进入 Pro 的可用清单。',
+      title: 'fix(models): 让 pro tier 识别到云端动态合并的模型',
+      summary: 'MODEL_TIER_ACCESS.pro 引用的是 ALL_MODEL_KEYS —— 模块加载时的 Object.keys(MODELS) 快照。mergeCloudModels 启动后加进来的五个 claude-opus-4-7-* 永远不在这个冻结数组里，每个请求都 403 model_not_entitled。一行改成 getter 让每次访问都重新枚举 live MODELS dict。三步 curl 复现写得教科书级。',
     },
     {
       login: 'colin1112a',
       pr: 13,
+      weight: 'B+',
+      weightLabel: '早期代码审查先行者（PR 未合但方向正确）',
       mergedAt: '2026-04-21',
       title: 'fix: 一次性审计并提交 15 个安全 / 并发 / 资源管理 bug',
-      summary: '系统性扫了一遍仓库，围绕 XSS 转义、shell 注入、OOM 防护、auth 路由位置、gRPC 双回调、LS pool 竞态、HTTP/2 frame 上限等方向提 PR。我们在这个基础上再加固了 JS-level escJsAttr、_pending 合并 ensureLs、LS 退出时释放 pooled session，以及一些后续 Antigravity 审计发现的延伸修复。感谢提醒项目该重视 issues 了。',
+      summary: '系统性扫了一遍仓库提了 CRITICAL/HIGH/MEDIUM 15 条修复建议：XSS 转义、shell 注入防护、10MB body 上限、auth 路由顺序、gRPC 双回调保护、LS pool 并发竞态、HTTP/2 frame 16MB 上限、varint BigInt 支持。PR 因改动面过大未直接合并，但其中多项被后续独立重做。',
     },
   ],
+  contributorRarity(weight) {
+    if (weight === 'S+') return 'UR';
+    if (weight === 'S' || weight === 'A+') return 'SSR';
+    return 'SR';
+  },
   loadCredits() {
     const body = document.getElementById('credits-body');
     if (!body) return;
@@ -3499,12 +4888,20 @@ const App = {
         <img class="avatar" src="https://github.com/${this.esc(c.login)}.png?size=128" alt="${this.esc(c.login)}" loading="lazy" onerror="this.style.visibility='hidden'">
         <div class="meta">
           <div class="meta-top">
-            <a class="name" target="_blank" rel="noopener" href="https://github.com/${this.esc(c.login)}">@${this.esc(c.login)}</a>
-            <a class="pr-link" target="_blank" rel="noopener" href="https://github.com/dwgx/WindsurfAPI/pull/${c.pr}">PR #${c.pr}</a>
-            <span class="merged-at">${this.esc(c.mergedAt)}</span>
+            <div class="identity">
+              <a class="name" target="_blank" rel="noopener" href="https://github.com/${this.esc(c.login)}">@${this.esc(c.login)}</a>
+              ${c.weight ? `<span class="rarity-badge rarity-${this.esc(this.contributorRarity(c.weight))}" title="${this.esc(c.weightLabel || '')}">${this.esc(this.contributorRarity(c.weight))}</span>` : ''}
+            </div>
+            <div class="links">
+              <a class="pr-link" target="_blank" rel="noopener" href="https://github.com/dwgx/WindsurfAPI/pull/${c.pr}">PR #${c.pr}</a>
+              <span class="merged-at">${this.esc(c.mergedAt)}</span>
+            </div>
           </div>
           <div class="pr-title">${this.esc(c.title)}</div>
-          <div class="summary">${this.esc(c.summary)}</div>
+          <details class="summary-toggle">
+            <summary>贡献详情</summary>
+            <div class="summary">${this.esc(c.summary)}</div>
+          </details>
         </div>
       </div>`).join('')}</div>`;
   },

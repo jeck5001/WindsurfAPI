@@ -144,9 +144,22 @@
   },
 
   "creditsBar": {
-    "daily": "D",
-    "weekly": "W",
-    "monthly": "M"
+    "daily": "Daily Quota",
+    "weekly": "Weekly Quota",
+    "monthly": "Monthly Quota",
+    "prompt": "Prompt Credits",
+    "dailyShort": "D",
+    "weeklyShort": "W",
+    "promptShort": "P",
+    "columnTitle": "Quota Usage",
+    "columnTooltip": "Two bars indicate:\nD — Daily premium-request remaining %\nW — Weekly premium-request remaining % (main signal for Trial accounts)\n\nHigher = more left = safer\nHover each bar for reset time",
+    "dailyDetail": "Daily {{pct}}% remaining (resets {{reset}})",
+    "weeklyDetail": "Weekly {{pct}}% remaining (resets {{reset}})",
+    "promptDetail": "Prompt credits {{remain}} / {{limit}} remaining ({{pct}}%)",
+    "dailyNA": "Windsurf returned no daily-quota data",
+    "weeklyNA": "Windsurf returned no weekly-quota data",
+    "promptNA": "No prompt-credit data for this account",
+    "noResetTime": "reset time unknown"
   },
 
   "section": {
@@ -209,9 +222,9 @@
     },
     "cascadeReuse": {
       "title": "Cascade Conversation Reuse",
-      "desc": "Reuse the same cascade_id across multi-turn conversations, only sending the latest user message to Windsurf. Let the server maintain context cache. Significantly reduces TTFB and upload volume on cache hits; automatically falls back to new session on cache miss or account/LS change. Requires client to retain full history and append in order (e.g., new-api, OpenWebUI).",
+      "desc": "Reuse the same cascade_id across multi-turn conversations, only sending the latest user message to Windsurf. Let the server maintain context cache. Significantly reduces TTFB and upload volume on cache hits; automatically falls back to new session on cache miss or account/LS change. Requires client to retain full history and append in order (e.g., new-api, OpenWebUI). Note: this toggle only governs cascade_id reuse across requests — it does NOT control whether Cascade is used. Tool-emulated requests (Claude Code / Cline / Cursor) auto-skip reuse because each turn's content changes, regardless of this setting.",
       "enable": "Enable Cascade Conversation Reuse",
-      "hint": "Disabled by default. When enabled, takes effect immediately on current conversation pool."
+      "hint": "Enabled by default. When disabled, Cascade is still used but a fresh session is created per turn. Takes effect immediately on current conversation pool."
     },
     "identityPrompt": {
       "title": "Model Identity Prompt",
@@ -245,7 +258,28 @@
       "title": "Account Health Status"
     },
     "requestChart": {
-      "title": "Request Volume Time Series"
+      "title": "Request Volume Time Series",
+      "subtitle": "Switch chart type and time range · hover for exact values",
+      "typeArea": "Area",
+      "typeLine": "Line",
+      "typeBar": "Bar",
+      "typeStacked": "Stacked",
+      "metricAll": "All Metrics",
+      "metricRequests": "Requests",
+      "metricErrors": "Errors",
+      "metricSuccess": "Success",
+      "legendRequests": "Requests",
+      "legendSuccess": "Success",
+      "legendErrors": "Errors",
+      "tooltipTime": "Time",
+      "tooltipRequests": "Requests",
+      "tooltipErrors": "Errors",
+      "tooltipSuccess": "Success",
+      "tooltipRate": "Success Rate"
+    },
+    "modelPie": {
+      "title": "Model Request Distribution",
+      "desc": "Share of requests for top 8 models"
     }
   },
 
@@ -467,9 +501,19 @@
   },
 
   "range": {
-    "6h": "Last 6h",
-    "24h": "Last 24h",
-    "72h": "Last 72h"
+    "6h": "6h",
+    "24h": "24h",
+    "72h": "72h",
+    "7d": "7d",
+    "30d": "30d",
+    "all": "All",
+    "custom": "Custom",
+    "customTitle": "Custom Date Range",
+    "customStart": "Start Date",
+    "customEnd": "End Date",
+    "customApply": "Apply",
+    "customCancel": "Cancel",
+    "customHint": "Showing up to last 30 days"
   },
 
   "credits": {
@@ -637,6 +681,48 @@
     },
     "ls": {
       "restarting": "Language Server restarting..."
+    },
+    "detail": {
+      "toggle": "Expand / collapse details",
+      "ago": "ago",
+      "resetAt": "resets",
+      "creditPerCall": "Credits charged per call",
+      "creditUnit": "",
+      "plan": {
+        "title": "Subscription",
+        "name": "Plan",
+        "tier": "Tier",
+        "start": "Start",
+        "end": "End",
+        "overage": "Overage balance"
+      },
+      "quota": {
+        "title": "Quota Usage",
+        "daily": "Daily",
+        "weekly": "Weekly",
+        "promptCredits": "Prompt credits",
+        "flexCredits": "Flex credits",
+        "used": "used",
+        "fetchedAt": "Fetched",
+        "notApplicable": "Not applicable to this plan"
+      },
+      "models": {
+        "title": "Available Models",
+        "available": "available",
+        "blocked": "blocked"
+      },
+      "runtime": {
+        "title": "Runtime",
+        "status": "Status",
+        "errors": "Errors",
+        "rpm": "RPM",
+        "lastUsed": "Last used",
+        "lastProbed": "Last probed",
+        "creditsFetched": "Credits refreshed",
+        "accountId": "Account ID",
+        "apiKey": "API Key",
+        "lastError": "Last error"
+      }
     }
   },
 

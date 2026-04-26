@@ -21,6 +21,22 @@ describe('resolveModel', () => {
     assert.equal(result, 'claude-opus-4.6');
   });
 
+  // Issue #68 — bare `claude-4.6` (no sonnet/opus split) used to fall through
+  // to silent legacy fallback; the model would self-identify as "Claude 4.5"
+  // because no model name was forwarded upstream. Default to sonnet.
+  it('resolves bare claude-4.6 to sonnet variant', () => {
+    assert.equal(resolveModel('claude-4.6'), 'claude-sonnet-4.6');
+    assert.equal(resolveModel('claude-4.6-thinking'), 'claude-sonnet-4.6-thinking');
+    assert.equal(resolveModel('claude-4.6-1m'), 'claude-sonnet-4.6-1m');
+    assert.equal(resolveModel('claude-4.6-thinking-1m'), 'claude-sonnet-4.6-thinking-1m');
+  });
+
+  it('bare claude-4.6 resolves to a real catalog entry (not silent fallback)', () => {
+    const info = getModelInfo(resolveModel('claude-4.6'));
+    assert.ok(info, 'claude-4.6 must map to a known model');
+    assert.equal(info.modelUid, 'claude-sonnet-4-6');
+  });
+
   it('returns input unchanged for unknown models', () => {
     assert.equal(resolveModel('nonexistent-model-xyz'), 'nonexistent-model-xyz');
   });
@@ -70,4 +86,25 @@ describe('MODEL_TIER_ACCESS', () => {
   it('expired tier is empty', () => {
     assert.deepEqual(MODEL_TIER_ACCESS.expired, []);
   });
+});
+
+describe('deprecated model markers', () => {
+  // Models the Windsurf upstream removed from Cascade. Requests for them
+  // come back as "neither PlanModel nor RequestedModel specified" — we
+  // catch that in handlers/chat.js with a 410 model_deprecated response.
+  // If any of these loses its deprecated flag without the actual upstream
+  // coming back, users will get the cryptic 502 again and reopen #8.
+  const KNOWN_DEPRECATED = [
+    'gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-5-mini',
+    'deepseek-v3', 'deepseek-v3-2', 'deepseek-r1',
+    'grok-3-mini', 'qwen-3',
+  ];
+
+  for (const key of KNOWN_DEPRECATED) {
+    it(`${key} is flagged deprecated`, () => {
+      const info = getModelInfo(key);
+      assert.ok(info, `${key} missing from MODELS`);
+      assert.equal(info.deprecated, true, `${key} lost its deprecated flag`);
+    });
+  }
 });

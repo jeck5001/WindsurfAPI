@@ -34,7 +34,7 @@ const POOL_MAX = 500;
 
 // fingerprint -> {
 //   cascadeId, sessionId, lsPort, apiKey,
-//   stepOffset, generatorOffset,
+//   callerKey, stepOffset, generatorOffset,
 //   createdAt, lastAccess
 // }
 const _pool = new Map();
@@ -93,6 +93,19 @@ function stripMetaTags(s) {
   return stripped;
 }
 
+function canonicalContentBlock(part) {
+  if (typeof part?.text === 'string') return part.text;
+  const type = String(part?.type || '').toLowerCase();
+  if (type === 'image' || type === 'image_url' || type === 'input_image'
+    || type === 'document' || type === 'file' || type === 'input_file'
+    || part?.source?.type === 'base64' || part?.image_url) {
+    return `[${type || 'binary'} omitted]`;
+  }
+  const raw = JSON.stringify(part ?? '');
+  if (/"data"\s*:\s*"[A-Za-z0-9+/=]{128,}"/.test(raw)) return '[binary omitted]';
+  return raw;
+}
+
 /**
  * Canonicalise a message list for hashing. Strips anything that could drift
  * between turns (id, name, tool metadata, client meta-tags) and normalises
@@ -102,7 +115,7 @@ function canonicalise(messages) {
   return messages.map(m => {
     let raw;
     if (typeof m.content === 'string') raw = m.content;
-    else if (Array.isArray(m.content)) raw = m.content.map(p => (typeof p?.text === 'string' ? p.text : JSON.stringify(p))).join('');
+    else if (Array.isArray(m.content)) raw = m.content.map(p => canonicalContentBlock(p)).join('');
     else raw = JSON.stringify(m.content ?? '');
     return { role: m.role, content: stripMetaTags(raw) };
   });
@@ -134,17 +147,17 @@ function stableTurns(messages) {
       : m);
 }
 
-export function fingerprintBefore(messages, modelKey = '') {
+export function fingerprintBefore(messages, modelKey = '', callerKey = '') {
   if (!Array.isArray(messages) || messages.length < 2) return null;
   const turns = stableTurns(messages);
   if (turns.length < 2) return null;
-  return sha256(modelKey + '\0' + systemPrefix(messages) + '\0' + JSON.stringify(canonicalise(turns.slice(0, -1))));
+  return sha256(String(callerKey || '') + '\0' + modelKey + '\0' + systemPrefix(messages) + '\0' + JSON.stringify(canonicalise(turns.slice(0, -1))));
 }
 
-export function fingerprintAfter(messages, modelKey = '') {
+export function fingerprintAfter(messages, modelKey = '', callerKey = '') {
   const turns = stableTurns(messages);
   if (!turns.length) return null;
-  return sha256(modelKey + '\0' + systemPrefix(messages) + '\0' + JSON.stringify(canonicalise(turns)));
+  return sha256(String(callerKey || '') + '\0' + modelKey + '\0' + systemPrefix(messages) + '\0' + JSON.stringify(canonicalise(turns)));
 }
 
 function prune(now) {
@@ -167,11 +180,15 @@ function prune(now) {
  * fingerprint on success (or just drop it on failure and a fresh cascade
  * will be created next turn).
  */
-export function checkout(fingerprint) {
+export function checkout(fingerprint, callerKey = '') {
   if (!fingerprint) { stats.misses++; return null; }
   const entry = _pool.get(fingerprint);
   if (!entry) { stats.misses++; return null; }
   _pool.delete(fingerprint);
+  if (entry.callerKey && callerKey && entry.callerKey !== callerKey) {
+    stats.misses++;
+    return null;
+  }
   if (Date.now() - entry.lastAccess > POOL_TTL_MS) {
     stats.expired++;
     stats.misses++;
@@ -184,7 +201,7 @@ export function checkout(fingerprint) {
 /**
  * Store (or restore) a conversation entry under a new fingerprint.
  */
-export function checkin(fingerprint, entry) {
+export function checkin(fingerprint, entry, callerKey = '') {
   if (!fingerprint || !entry) return;
   const now = Date.now();
   _pool.set(fingerprint, {
@@ -192,6 +209,7 @@ export function checkin(fingerprint, entry) {
     sessionId: entry.sessionId,
     lsPort: entry.lsPort,
     apiKey: entry.apiKey,
+    callerKey: callerKey || entry.callerKey || '',
     stepOffset: Number.isFinite(entry.stepOffset) ? entry.stepOffset : 0,
     generatorOffset: Number.isFinite(entry.generatorOffset) ? entry.generatorOffset : 0,
     createdAt: entry.createdAt || now,

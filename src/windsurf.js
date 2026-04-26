@@ -374,20 +374,24 @@ function buildCascadeConfig(modelEnum, modelUid, { toolPreamble, forceDefault } 
   //   field 10: tool_calling_section
   //   field 12: additional_instructions_section
   //
-  // Key insight: NO_TOOL mode (planner_mode=3) appears to SUPPRESS the
+  // Key insight: NO_TOOL mode (planner_mode=3) SUPPRESSES the
   // tool_calling_section entirely — SectionOverrideConfig on field 10 is
-  // injected but never rendered to the model.  Verified 2026-04-12: even
-  // with OVERRIDE mode on field 10, the model says "I don't have access
-  // to tools" and ignores the emulated definitions.
+  // injected but never rendered to the model. Verified 2026-04-12: even
+  // with OVERRIDE mode on field 10, the model said "I don't have access
+  // to tools" and ignored the emulated definitions.
   //
-  // Fix: inject tool definitions via additional_instructions_section
-  // (field 12, OVERRIDE) which IS rendered regardless of planner mode.
-  // Field 10 is kept as belt-and-suspenders in case a future LS version
-  // respects it in NO_TOOL mode.
+  // We deliver tool definitions exclusively via
+  // additional_instructions_section (field 12, OVERRIDE) which IS
+  // rendered regardless of planner mode. The earlier code also wrote the
+  // same blob to field 10 as belt-and-suspenders, but with a 30+ tool
+  // Claude Code request that doubled the proto-level system payload and
+  // pushed total LS panel state past the ~30KB ceiling — directly causing
+  // the "tools work locally but not in cloud" symptom users reported.
+  // Field 10 is now intentionally left untouched.
   if (toolPreamble) {
     // ── Client provided OpenAI tools[] ──
-    // Primary delivery: additional_instructions_section (field 12, OVERRIDE).
-    // This section is always rendered, even in NO_TOOL planner mode.
+    // Primary (and only) delivery: additional_instructions_section
+    // (field 12, OVERRIDE). Always rendered, even in NO_TOOL planner mode.
     const sp = getSystemPrompts();
     const reinforcement = '\n\n' + sp.toolReinforcement;
     const additionalSection = Buffer.concat([
@@ -395,14 +399,6 @@ function buildCascadeConfig(modelEnum, modelUid, { toolPreamble, forceDefault } 
       writeStringField(2, toolPreamble + reinforcement),
     ]);
     convParts.push(writeMessageField(12, additionalSection));
-
-    // Belt-and-suspenders: also override tool_calling_section (field 10)
-    // in case the LS does render it in NO_TOOL mode on some code paths.
-    const toolSection = Buffer.concat([
-      writeVarintField(1, 1),             // SECTION_OVERRIDE_MODE_OVERRIDE
-      writeStringField(2, toolPreamble),
-    ]);
-    convParts.push(writeMessageField(10, toolSection));
 
     // field 13 (communication_section): minimal override.
     // DO NOT include any identity manipulation instructions here — Cascade's
@@ -441,13 +437,27 @@ function buildCascadeConfig(modelEnum, modelUid, { toolPreamble, forceDefault } 
     ]);
     convParts.push(writeMessageField(10, noToolSection));
 
-    // field 12 (additional_instructions): reinforce direct-answer mode
+    // field 12 (additional_instructions): reinforce direct-answer mode.
+    // Cascade's coding-agent training prior is strong — even with planner_mode
+    // NO_TOOL and "no tools available" system text, it will still narrate
+    // "Let me check /src/main.py" or "I opened config.yaml and saw..." purely
+    // from distribution, and clients like Claude Code then try to Read those
+    // paths in a loop (issue #24). Make the prohibition explicit at the
+    // behaviour level, not just the capability level.
     const noToolAdditional = Buffer.concat([
       writeVarintField(1, 1),             // SECTION_OVERRIDE_MODE_OVERRIDE
       writeStringField(2,
-        'You have no tools, no file access, and no command execution. ' +
-        'Answer all questions directly using your knowledge. ' +
-        'Never pretend to create files or check directories.'),
+        'CRITICAL OPERATING CONSTRAINT — READ BEFORE ANY RESPONSE:\n' +
+        'You are being accessed as a plain chat API. You have NO tools, NO file access, NO shell, NO code execution, NO repository awareness, NO ability to list or read anything on the user\'s machine or any sandbox. You cannot "check", "look at", "open", "view", "inspect", "run", "glob", "grep", "list", or "edit" anything.\n' +
+        '\n' +
+        'OUTPUT RULES:\n' +
+        '1. Never narrate tool-like actions ("Let me check X", "I\'ll look at Y", "Looking at the file...", "I see in main.py...", "Based on the codebase...").\n' +
+        '2. Never reference file paths, directory structures, line numbers, or repository contents that were not explicitly pasted into the current conversation by the user.\n' +
+        '3. If the user asks about their code or project but hasn\'t pasted the relevant file content, respond: "I don\'t see that file in our conversation — please paste it and I\'ll help." Do NOT invent file contents.\n' +
+        '4. For general questions, answer directly from your training knowledge. No preambles.\n' +
+        '5. Match the user\'s language (Chinese → Chinese, English → English; never switch mid-conversation).\n' +
+        '\n' +
+        'Violating these rules will produce broken output for the end user. Stay in chat-API mode at all times.'),
     ]);
     convParts.push(writeMessageField(12, noToolAdditional));
 

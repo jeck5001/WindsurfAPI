@@ -22,7 +22,18 @@ function genMsgId() {
 // ─── Anthropic → OpenAI request translation ──────────────────
 
 function anthropicToOpenAI(body) {
+  const mapAnthropicToolChoice = (toolChoice) => {
+    if (!toolChoice || typeof toolChoice !== 'object') return toolChoice;
+    if (toolChoice.type === 'auto') return 'auto';
+    if (toolChoice.type === 'any') return 'required';
+    if (toolChoice.type === 'none') return 'none';
+    if (toolChoice.type === 'tool' && toolChoice.name) {
+      return { type: 'function', function: { name: toolChoice.name } };
+    }
+    return toolChoice;
+  };
   const messages = [];
+  const toolNameById = new Map();
   if (body.system) {
     const sysText = typeof body.system === 'string'
       ? body.system
@@ -48,17 +59,23 @@ function anthropicToOpenAI(body) {
         } else if (block.type === 'thinking') {
           // Thinking blocks from assistant history — skip; the model will regenerate
         } else if (block.type === 'tool_use' && role === 'assistant') {
+          const id = block.id || `call_${randomUUID().slice(0, 8)}`;
+          toolNameById.set(id, block.name || '');
           toolCalls.push({
-            id: block.id || `call_${randomUUID().slice(0, 8)}`,
+            id,
             type: 'function',
             function: { name: block.name, arguments: JSON.stringify(block.input || {}) },
           });
         } else if (block.type === 'tool_result') {
-          const content = typeof block.content === 'string'
+          let content = typeof block.content === 'string'
             ? block.content
             : Array.isArray(block.content)
               ? block.content.map(b => b.text || '').join('\n')
               : JSON.stringify(block.content);
+          content = annotateRiskyReadToolResult(content, {
+            toolName: toolNameById.get(block.tool_use_id),
+            isError: !!block.is_error,
+          });
           toolResults.push({ role: 'tool', tool_call_id: block.tool_use_id, content });
         }
       }
@@ -95,7 +112,25 @@ function anthropicToOpenAI(body) {
     ...(body.temperature != null ? { temperature: body.temperature } : {}),
     ...(body.top_p != null ? { top_p: body.top_p } : {}),
     ...(body.stop_sequences ? { stop: body.stop_sequences } : {}),
+    ...(body.tool_choice ? { tool_choice: mapAnthropicToolChoice(body.tool_choice) } : {}),
+    ...(body.thinking ? { thinking: body.thinking } : {}),
   };
+}
+
+export function annotateRiskyReadToolResult(content, { toolName = '', isError = false } = {}) {
+  if (toolName !== 'Read' || typeof content !== 'string' || !content) return content;
+  const lower = content.toLowerCase();
+  const isOversizeNoContent = isError
+    && /file content \([^)]+\) exceeds maximum allowed size/i.test(content)
+    && /use offset and limit parameters/i.test(content);
+  const isCachedStub = (
+    /(?:file )?(?:content )?(?:unchanged|cached)/i.test(content)
+    || /(?:内容未变更|已缓存)/.test(content)
+  ) && content.length < 2000;
+  const mentionsTruncation = /truncated|截断|丢失/.test(lower);
+  if (!isOversizeNoContent && !isCachedStub && !mentionsTruncation) return content;
+
+  return `${content}\n\n[WindsurfAPI note: This Read result does not prove the full file body is available in the current conversation. If the task depends on full file contents, use Read with offset/limit or another content-bearing tool result before returning PASS.]`;
 }
 
 // ─── OpenAI → Anthropic non-stream response translation ──────
@@ -248,6 +283,10 @@ class AnthropicStreamTranslator {
   }
 
   processChunk(chunk) {
+    if (chunk.error) {
+      this.error(chunk.error);
+      return;
+    }
     this.startMessage();
     const choice = chunk.choices?.[0];
     if (choice) {
@@ -281,6 +320,19 @@ class AnthropicStreamTranslator {
       },
     });
     this.send('message_stop', { type: 'message_stop' });
+  }
+
+  error(err) {
+    if (this.messageStopped) return;
+    this.messageStopped = true;
+    this.closeCurrentBlock();
+    this.send('error', {
+      type: 'error',
+      error: {
+        type: err?.type || 'api_error',
+        message: err?.message || 'Upstream stream error',
+      },
+    });
   }
 
   // SSE parser — handleChatCompletions writes `data: {...}\n\n` frames;
@@ -370,14 +422,15 @@ function createCaptureRes(translator, realRes) {
 
 // ─── Main entry ───────────────────────────────────────────────
 
-export async function handleMessages(body) {
+export async function handleMessages(body, context = {}) {
   const msgId = genMsgId();
   const requestedModel = body.model || 'claude-sonnet-4.6';
   const wantStream = !!body.stream;
   const openaiBody = anthropicToOpenAI(body);
+  const chatHandler = context.handleChatCompletions || handleChatCompletions;
 
   if (!wantStream) {
-    const result = await handleChatCompletions({ ...openaiBody, stream: false });
+    const result = await chatHandler({ ...openaiBody, stream: false }, context);
     if (result.status !== 200) {
       return {
         status: result.status,
@@ -396,7 +449,7 @@ export async function handleMessages(body) {
   // Streaming path — ask handleChatCompletions for its streaming handler and
   // point its writes at our translator shim. This lets the upstream Cascade
   // poll loop drive the downstream SSE in real time — no buffer-then-replay.
-  const streamResult = await handleChatCompletions({ ...openaiBody, stream: true });
+  const streamResult = await chatHandler({ ...openaiBody, stream: true }, context);
 
   if (!streamResult.stream) {
     // The OpenAI path returned a non-stream error (e.g. 403 model_not_entitled)
@@ -436,10 +489,7 @@ export async function handleMessages(body) {
         await streamResult.handler(captureRes);
       } catch (e) {
         log.error(`Messages stream error: ${e.message}`);
-        if (!translator.messageStarted) {
-          translator.startMessage();
-        }
-        translator.finish();
+        translator.error({ type: 'api_error', message: e.message });
       }
 
       if (!realRes.writableEnded) realRes.end();
