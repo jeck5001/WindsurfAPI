@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { repairToolCallArguments } from '../src/handlers/chat.js';
 import {
   ToolCallStreamParser,
   parseToolCallsFromText,
@@ -143,7 +144,7 @@ describe('buildToolPreamble (injection-guard safety)', () => {
     // No fenced ```json blocks (schemas would live inside these)
     assert.ok(!/```json/i.test(preamble), 'preamble must not contain fenced json schema blocks');
     // Stays well under a "system prompt wall of text" size even with many tools
-    assert.ok(preamble.length < 512, `preamble must stay compact (<512 chars); got ${preamble.length}`);
+    assert.ok(preamble.length < 640, `preamble must stay compact (<640 chars); got ${preamble.length}`);
   });
 
   it('still describes the <tool_call> protocol and lists every tool name', () => {
@@ -151,6 +152,8 @@ describe('buildToolPreamble (injection-guard safety)', () => {
     for (const t of manyTools) {
       assert.ok(preamble.includes(t.function.name), `must include function name ${t.function.name}`);
     }
+    assert.ok(preamble.includes('arguments.command'), 'must carry the short Bash argument hint');
+    assert.ok(preamble.includes('arguments.file_path'), 'must carry the short Read argument hint');
   });
 
   it('normalizeMessagesForCascade prepends preamble to last user message without jailbreak or system-prompt shape', () => {
@@ -171,6 +174,18 @@ describe('buildToolPreamble (injection-guard safety)', () => {
     assert.equal(buildToolPreamble([]), '');
     assert.equal(buildToolPreamble([{ type: 'other' }]), '');
     assert.equal(buildToolPreamble([{ type: 'function' }]), '');
+  });
+
+  it('adds Bash and Read argument fidelity rules only to the proto preamble', () => {
+    const full = buildToolPreambleForProto(manyTools, 'auto');
+    assert.match(full, /Tool argument fidelity rules:/);
+    assert.match(full, /Bash: arguments MUST include the full command string/);
+    assert.match(full, /Preserve quotes, flags, pipes, redirections/);
+    assert.match(full, /Read: use "file_path" exactly/);
+    assert.ok(!preamble.includes('Tool argument fidelity rules:'),
+      'user-message fallback must not include the long proto-only rule block');
+    assert.ok(preamble.includes('arguments.command'),
+      'user-message fallback should include the compact Bash argument hint');
   });
 });
 
@@ -254,6 +269,18 @@ describe('buildCompactToolPreambleForProto (payload budget fallback)', () => {
     for (const re of banned) {
       assert.ok(!re.test(compact), `compact preamble must not match ${re}`);
     }
+  });
+
+  it('compact form keeps known-tool argument fidelity rules even without schemas', () => {
+    const tools = [
+      { type: 'function', function: { name: 'Bash', description: 'Run shell', parameters: { type: 'object', properties: { command: { type: 'string' } } } } },
+      { type: 'function', function: { name: 'Read', description: 'Read file', parameters: { type: 'object', properties: { file_path: { type: 'string' } } } } },
+    ];
+    const compact = buildCompactToolPreambleForProto(tools, 'auto');
+    assert.match(compact, /Tool argument fidelity rules:/);
+    assert.match(compact, /Bash: arguments MUST include the full command string/);
+    assert.match(compact, /Read: use "file_path" exactly/);
+    assert.ok(!compact.includes('"properties"'), 'compact form must still avoid full schemas');
   });
 });
 
@@ -359,5 +386,38 @@ describe('normalizeMessagesForCascade (preamble placement regression)', () => {
     assert.ok(Array.isArray(out[0].content));
     assert.deepEqual(out[0].content[0], image);
     assert.equal(out[0].content[1].text, 'what is this?');
+  });
+});
+
+describe('repairToolCallArguments', () => {
+  it('repairs Bash command prefix truncation when the user gave an exact command', () => {
+    const tc = {
+      name: 'Bash',
+      argumentsJson: JSON.stringify({ command: 'node -p' }),
+    };
+    const repaired = repairToolCallArguments(tc, [
+      {
+        role: 'user',
+        content: 'Tool 2: Bash with command exactly node -p "require(\'./package.json\').version".',
+      },
+    ]);
+    assert.equal(
+      JSON.parse(repaired.argumentsJson).command,
+      'node -p "require(\'./package.json\').version"'
+    );
+  });
+
+  it('does not invent Bash arguments when the model command is not a prefix', () => {
+    const tc = {
+      name: 'Bash',
+      argumentsJson: JSON.stringify({ command: 'npm test' }),
+    };
+    const repaired = repairToolCallArguments(tc, [
+      {
+        role: 'user',
+        content: 'Run exactly node -p "require(\'./package.json\').version".',
+      },
+    ]);
+    assert.equal(JSON.parse(repaired.argumentsJson).command, 'npm test');
   });
 });

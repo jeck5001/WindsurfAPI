@@ -65,7 +65,11 @@ export function buildToolPreamble(tools) {
   // "User-message-level fallback preamble" comment block at the top of
   // this module for the injection-shape rationale. Full schemas live
   // in the proto-level tool_calling_section override.
-  return `Tools available this turn: ${names.join(', ')}. To call one, emit a single-line block: <tool_call>{"name":"...","arguments":{...}}</tool_call>. Otherwise answer directly in plain text. After the last <tool_call>, stop generating; the caller returns results in the next turn as <tool_result tool_call_id="...">...</tool_result>.`;
+  const hints = [];
+  const lowerNames = new Set(names.map(n => n.toLowerCase()));
+  if (lowerNames.has('bash')) hints.push('For Bash, put the complete shell command in arguments.command.');
+  if (lowerNames.has('read')) hints.push('For Read, put the exact path in arguments.file_path.');
+  return `Tools available this turn: ${names.join(', ')}. To call one, emit a single-line block: <tool_call>{"name":"...","arguments":{...}}</tool_call>. ${hints.join(' ')} Otherwise answer directly in plain text. After the last <tool_call>, stop generating; the caller returns results in the next turn as <tool_result tool_call_id="...">...</tool_result>.`;
 }
 
 /**
@@ -100,6 +104,28 @@ const TOOL_CHOICE_SUFFIX = {
   none: `
 6. Do NOT call any functions. Answer the user's question directly in plain text.`,
 };
+
+function lowerToolName(t) {
+  return String(t?.function?.name || '').trim().toLowerCase();
+}
+
+function toolSpecificRules(tools) {
+  const names = new Set((tools || []).map(lowerToolName).filter(Boolean));
+  const lines = [];
+  if (names.has('bash')) {
+    lines.push('- Bash: arguments MUST include the full command string in the "command" field. Preserve quotes, flags, pipes, redirections, and shell operators exactly as requested. Do not shorten, reinterpret, split, or ask for the command again when it was already provided.');
+  }
+  if (names.has('read')) {
+    lines.push('- Read: use "file_path" exactly for the path argument. If the user gives a concrete path, copy that path exactly instead of substituting a workspace guess.');
+  }
+  if (names.has('write')) {
+    lines.push('- Write: use "file_path" for the target path and "content" for bytes to write. Do not replace requested content with a summary or placeholder.');
+  }
+  if (names.has('edit') || names.has('multiedit')) {
+    lines.push('- Edit/MultiEdit: preserve old_string/new_string text exactly, including whitespace and quotes. Do not paraphrase file edits.');
+  }
+  return lines;
+}
 
 /**
  * Resolve the OpenAI tool_choice parameter into a { mode, forceName } pair.
@@ -146,6 +172,12 @@ export function buildToolPreambleForProto(tools, toolChoice, environment) {
   lines.push(TOOL_CHOICE_SUFFIX[mode] || TOOL_CHOICE_SUFFIX.auto);
   if (forceName) {
     lines.push(`7. You MUST call the function "${forceName}". No other function and no direct answer.`);
+  }
+  const specificRules = toolSpecificRules(tools);
+  if (specificRules.length) {
+    lines.push('');
+    lines.push('Tool argument fidelity rules:');
+    lines.push(...specificRules);
   }
   lines.push('');
   lines.push('Available functions:');
@@ -199,6 +231,12 @@ export function buildCompactToolPreambleForProto(tools, toolChoice, environment)
   lines.push(TOOL_CHOICE_SUFFIX[mode] || TOOL_CHOICE_SUFFIX.auto);
   if (forceName) {
     lines.push(`7. You MUST call the function "${forceName}". No other function and no direct answer.`);
+  }
+  const specificRules = toolSpecificRules(tools);
+  if (specificRules.length) {
+    lines.push('');
+    lines.push('Tool argument fidelity rules:');
+    lines.push(...specificRules);
   }
   lines.push('');
   lines.push(`Available functions: ${names.join(', ')}.`);

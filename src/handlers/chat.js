@@ -4,7 +4,7 @@
  */
 
 import { createHash, randomUUID } from 'crypto';
-import { WindsurfClient, isCascadeTransportError } from '../client.js';
+import { WindsurfClient, contentToString, isCascadeTransportError } from '../client.js';
 import { getApiKey, acquireAccountByKey, releaseAccount, getAccountAvailability, reportError, reportSuccess, markRateLimited, reportInternalError, updateCapability, getAccountList, isAllRateLimited, isAllTemporarilyUnavailable, refundReservation } from '../auth.js';
 import { resolveModel, getModelInfo } from '../models.js';
 import { getLsFor, ensureLs } from '../langserver.js';
@@ -132,6 +132,185 @@ function extractJsonPayload(text) {
   return trimmed;
 }
 
+function textFromMessageContent(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter(p => typeof p?.text === 'string')
+      .map(p => p.text)
+      .join('\n');
+  }
+  return '';
+}
+
+export function extractRequestedJsonKeys(messages) {
+  if (!Array.isArray(messages)) return [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role !== 'user') continue;
+    const text = textFromMessageContent(m.content).split('\n\n[You MUST respond with valid JSON only.')[0];
+    if (!text || /^\s*<tool_result\b/i.test(text)) continue;
+    const match = text.match(/\b(?:exact\s+)?keys\s+([A-Za-z_$][\w$-]*(?:\s*,\s*[A-Za-z_$][\w$-]*)*(?:\s+(?:and|&)\s+(?!no\b)[A-Za-z_$][\w$-]*)?)/i);
+    if (!match) continue;
+    return match[1]
+      .replace(/\s+(?:and|&)\s+/gi, ',')
+      .split(',')
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+export function isExplicitJsonRequested(messages) {
+  if (!Array.isArray(messages)) return false;
+  for (const m of messages) {
+    if (m?.role !== 'user') continue;
+    const text = textFromMessageContent(m.content);
+    if (!text || /^\s*<tool_result\b/i.test(text)) continue;
+    if (/\b(?:compact\s+)?JSON\b/i.test(text) && /\b(?:answer|respond|return|output|containing|with|only|valid)\b/i.test(text)) {
+      return true;
+    }
+    if (/\bJSON\s+(?:object|only|format)\b/i.test(text)) return true;
+    if (/\b(?:answer|respond|return|output)\s+only\s+(?:with\s+)?(?:valid\s+)?JSON\b/i.test(text)) return true;
+  }
+  return false;
+}
+
+function appendJsonHintToContent(content, hint) {
+  if (typeof content === 'string') return content + hint;
+  if (Array.isArray(content)) return [...content, { type: 'text', text: hint }];
+  return content;
+}
+
+function plainObject(v) {
+  return v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function findDeepValue(obj, wanted) {
+  if (!plainObject(obj) && !Array.isArray(obj)) return undefined;
+  const wantedLower = wanted.toLowerCase();
+  const stack = [obj];
+  while (stack.length) {
+    const cur = stack.shift();
+    if (plainObject(cur)) {
+      for (const [k, v] of Object.entries(cur)) {
+        if (k.toLowerCase() === wantedLower) return v;
+        if (plainObject(v) || Array.isArray(v)) stack.push(v);
+      }
+    } else if (Array.isArray(cur)) {
+      for (const v of cur) {
+        if (plainObject(v) || Array.isArray(v)) stack.push(v);
+      }
+    }
+  }
+  return undefined;
+}
+
+function safeJsonParse(text) {
+  try { return JSON.parse(text); } catch { return undefined; }
+}
+
+function collectToolFacts(messages) {
+  const namesById = new Map();
+  const facts = { byTool: {}, all: [] };
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (m?.role === 'assistant' && Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) namesById.set(tc.id, tc.function?.name || '');
+    }
+    if (m?.role !== 'tool') continue;
+    const toolName = namesById.get(m.tool_call_id) || 'tool';
+    const key = toolName.toLowerCase();
+    const content = typeof m.content === 'string' ? m.content.trim() : JSON.stringify(m.content ?? '');
+    const parsed = safeJsonParse(extractJsonPayload(content));
+    const fact = { toolName, content, parsed };
+    facts.all.push(fact);
+    if (!facts.byTool[key]) facts.byTool[key] = [];
+    facts.byTool[key].push(fact);
+  }
+  return facts;
+}
+
+function valueFromToolFacts(key, facts) {
+  const lower = key.toLowerCase();
+  if (lower === 'versionsmatch' || lower === 'versionmatch') return undefined;
+  const wantsRead = lower.startsWith('read') || lower.includes('read');
+  const wantsBash = lower.startsWith('bash') || lower.includes('bash');
+  const wantsVersion = lower.includes('version');
+  const wantsName = lower.includes('name') || lower.includes('package');
+  const candidates = wantsRead ? (facts.byTool.read || [])
+    : wantsBash ? (facts.byTool.bash || [])
+      : facts.all;
+
+  if (wantsVersion) {
+    for (const f of candidates) {
+      if (plainObject(f.parsed)) {
+        const v = findDeepValue(f.parsed, 'version');
+        if (v !== undefined) return v;
+      }
+      const m = f.content.match(/\b\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\b/);
+      if (m) return m[0];
+    }
+  }
+  if (wantsName) {
+    for (const f of candidates) {
+      if (plainObject(f.parsed)) {
+        const v = findDeepValue(f.parsed, 'name');
+        if (v !== undefined) return v;
+      }
+    }
+  }
+  if (lower === 'ok') return true;
+  return undefined;
+}
+
+export function stabilizeJsonPayload(text, messages) {
+  const keys = extractRequestedJsonKeys(messages);
+  if (!keys.length) return text;
+  const cleaned = extractJsonPayload(text);
+  const parsed = safeJsonParse(cleaned);
+  if (!plainObject(parsed)) return cleaned;
+  const existingKeys = Object.keys(parsed);
+  if (existingKeys.length === keys.length && keys.every((k, i) => existingKeys[i] === k)) {
+    return cleaned;
+  }
+
+  const facts = collectToolFacts(messages);
+  const out = {};
+  for (const key of keys) {
+    let v = findDeepValue(parsed, key);
+    if (v === undefined) v = valueFromToolFacts(key, facts);
+    out[key] = v === undefined ? null : v;
+  }
+  for (const key of keys) {
+    const lower = key.toLowerCase();
+    if ((lower === 'versionsmatch' || lower === 'versionmatch') && out[key] == null) {
+      const read = out.readVersion ?? out.read_version;
+      const bash = out.bashVersion ?? out.bash_version;
+      if (read != null && bash != null) out[key] = String(read).trim() === String(bash).trim();
+    }
+  }
+  return JSON.stringify(out);
+}
+
+export function applyJsonResponseHint(messages, responseFormat) {
+  let jsonHint = '\n\n[You MUST respond with valid JSON only. No markdown code fences, no explanation text, no prefix/suffix. Your entire response must be a single parseable JSON object. Preserve the exact JSON field names requested by the user, and do not add extra fields when an exact key set is requested. If tool results contain the requested values, put only those values into JSON fields rather than describing them in prose or copying the full tool result.';
+  if (responseFormat?.type === 'json_schema' && responseFormat?.json_schema?.schema) {
+    jsonHint += ' Conform to this JSON Schema:\n' + JSON.stringify(responseFormat.json_schema.schema);
+  }
+  jsonHint += ']';
+
+  const sysJsonMsg = { role: 'system', content: 'Respond with valid JSON only. No markdown, no code fences, no explanation. Output must be parseable by JSON.parse().' };
+  const out = [sysJsonMsg, ...(Array.isArray(messages) ? messages : [])];
+  for (let i = out.length - 1; i >= 1; i--) {
+    if (out[i]?.role !== 'user') continue;
+    const text = textFromMessageContent(out[i].content);
+    if (/^\s*<tool_result\b/i.test(text)) continue;
+    out[i] = { ...out[i], content: appendJsonHintToContent(out[i].content, jsonHint) };
+    break;
+  }
+  return out;
+}
+
 const CASCADE_REUSE_STRICT = process.env.CASCADE_REUSE_STRICT === '1';
 const CASCADE_REUSE_STRICT_RETRY_MS = (() => {
   const n = parseInt(process.env.CASCADE_REUSE_STRICT_RETRY_MS || '', 10);
@@ -154,6 +333,18 @@ function isToolSensitiveOpusModel(modelKey = '') {
 // Claude Code is the exception: replaying the full prompt/tools/image
 // history is worse than preserving the exact upstream cascade, so enable
 // a narrow local path.
+// thinking.type can be 'enabled' (Anthropic spec), 'adaptive' (what
+// Claude Code 2.x sonnet defaults to), or any future variant — accept
+// anything that isn't an explicit 'disabled' so the model still gets
+// routed to the -thinking sibling. The previous strict 'enabled' check
+// silently dropped every adaptive request to the non-thinking model.
+export function isThinkingRequested(body) {
+  const thinkingType = body?.thinking?.type;
+  if (thinkingType && thinkingType !== 'disabled') return true;
+  if (body?.reasoning_effort) return true;
+  return false;
+}
+
 export function shouldUseCascadeReuse({ useCascade, emulateTools, modelKey, allowToolReuse = OPUS47_TOOL_EMULATED_REUSE }) {
   if (!useCascade) return false;
   if (!emulateTools) return true;
@@ -186,7 +377,87 @@ function strictReuseMessage(model, retryMs, reason = 'temporarily unavailable') 
   return `${model} 上下文复用绑定账号暂不可用（${reason}）。为避免切换账号导致上下文丢失，请 ${Math.ceil(retryMs / 1000)} 秒后重试`;
 }
 
+function recentUserText(messages) {
+  if (!Array.isArray(messages)) return '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') return contentToString(messages[i].content);
+  }
+  return '';
+}
+
+function shellUnquote(text) {
+  const s = String(text || '').trim();
+  if (s.length >= 2 && ((s[0] === '"' && s.at(-1) === '"') || (s[0] === '\'' && s.at(-1) === '\''))) {
+    return s.slice(1, -1);
+  }
+  return s;
+}
+
+function trimCommandSentence(text) {
+  const s = String(text || '').trim();
+  let quote = '';
+  let escaped = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\' && quote) { escaped = true; continue; }
+    if (quote) {
+      if (ch === quote) quote = '';
+      continue;
+    }
+    if (ch === '"' || ch === '\'') {
+      quote = ch;
+      continue;
+    }
+    if (ch === '.' && /\s/.test(s[i + 1] || '')) return s.slice(0, i).trim();
+  }
+  return s.replace(/[.。]\s*$/, '').trim();
+}
+
+function extractRequestedBashCommands(text) {
+  const src = String(text || '');
+  const out = [];
+  const patterns = [
+    /(?:command|run|execute)\s+(?:exactly\s+)?(?::\s*)?`([^`]+)`/gi,
+    /(?:command|run|execute)\s+(?:exactly\s+)?(?::\s*)?([^\n]+)/gi,
+  ];
+  for (const re of patterns) {
+    for (const m of src.matchAll(re)) {
+      const candidate = shellUnquote(trimCommandSentence(m[1])).trim();
+      if (candidate && /\s/.test(candidate)) out.push(candidate);
+    }
+  }
+  return [...new Set(out)];
+}
+
+export function repairToolCallArguments(tc, messages) {
+  if (!tc || String(tc.name || '').toLowerCase() !== 'bash' || typeof tc.argumentsJson !== 'string') return tc;
+  let args;
+  try { args = JSON.parse(tc.argumentsJson); } catch { return tc; }
+  if (!args || typeof args.command !== 'string') return tc;
+  const current = args.command.trim();
+  if (!current) return tc;
+  for (const requested of extractRequestedBashCommands(recentUserText(messages))) {
+    if (requested.length > current.length && requested.startsWith(current)) {
+      return { ...tc, argumentsJson: JSON.stringify({ ...args, command: requested }) };
+    }
+  }
+  return tc;
+}
+
 export function rateLimitCooldownMs(message = '') {
+  const reset = String(message || '').match(/resets?\s+in\s*:?\s*((?:(?:\d+)\s*[hms]\s*)+)/i);
+  if (reset) {
+    let total = 0;
+    for (const part of reset[1].matchAll(/(\d+)\s*([hms])/gi)) {
+      const n = Number(part[1]);
+      const unit = part[2].toLowerCase();
+      if (unit === 'h') total += n * 60 * 60 * 1000;
+      else if (unit === 'm') total += n * 60 * 1000;
+      else total += n * 1000;
+    }
+    if (total > 0) return total;
+  }
   const m = String(message || '').match(/(?:retry (?:after|in)|after)\s+(\d+)\s*(seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)/i);
   if (m) {
     const n = Number(m[1]);
@@ -548,28 +819,20 @@ export async function handleChatCompletions(body, context = {}) {
     }
   }
 
-  const wantJson = response_format?.type === 'json_object' || response_format?.type === 'json_schema';
+  const explicitJson = isExplicitJsonRequested(messages);
+  const wantJson = response_format?.type === 'json_object' || response_format?.type === 'json_schema' || explicitJson;
   if (wantJson) {
-    let jsonHint = '\n\n[You MUST respond with valid JSON only. No markdown code fences, no explanation text, no prefix/suffix. Your entire response must be a single parseable JSON object.';
-    if (response_format?.type === 'json_schema' && response_format?.json_schema?.schema) {
-      jsonHint += ' Conform to this JSON Schema:\n' + JSON.stringify(response_format.json_schema.schema);
-    }
-    jsonHint += ']';
-    const sysJsonMsg = { role: 'system', content: 'Respond with valid JSON only. No markdown, no code fences, no explanation. Output must be parseable by JSON.parse().' };
-    messages = [sysJsonMsg, ...messages.map((m, i) => {
-      if (i === messages.length - 1 && m.role === 'user') {
-        const content = typeof m.content === 'string' ? m.content + jsonHint : m.content;
-        return { ...m, content };
-      }
-      return m;
-    })];
+    messages = applyJsonResponseHint(messages, response_format);
   }
 
   const modelKey = resolveModel(reqModel || config.defaultModel);
-  const wantThinking = !!(body.thinking?.type === 'enabled' || body.reasoning_effort);
+  const wantThinking = isThinkingRequested(body);
   let effectiveModelKey = modelKey;
   if (wantThinking && !modelKey.includes('thinking') && getModelInfo(modelKey + '-thinking')) {
     effectiveModelKey = modelKey + '-thinking';
+  }
+  if (effectiveModelKey !== modelKey) {
+    log.info(`Chat[${reqId}]: routed ${modelKey} -> ${effectiveModelKey} (wantThinking=${wantThinking})`);
   }
   const modelInfo = getModelInfo(effectiveModelKey) || getModelInfo(modelKey);
   // Reject unknown models. Without this, chat.js used to fall through to
@@ -1046,11 +1309,11 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     allText = sanitizeText(allText);
     allText = neutralizeCascadeIdentity(allText, model);
     if (wantJson && allText) {
-      allText = extractJsonPayload(allText);
+      allText = stabilizeJsonPayload(allText, messages);
     }
     allThinking = sanitizeText(allThinking);
     if (toolCalls.length) {
-      toolCalls = toolCalls.map(tc => sanitizeToolCall(tc));
+      toolCalls = toolCalls.map(tc => sanitizeToolCall(repairToolCallArguments(tc, messages)));
     }
 
     // Check the cascade back into the pool under the *post-turn* fingerprint
@@ -1347,7 +1610,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
                   emitContent(pathStreamText.feed(item.text));
                   continue;
                 }
-                const tc = sanitizeToolCall(item.toolCall);
+                const tc = sanitizeToolCall(repairToolCallArguments(item.toolCall, messages));
                 const idx = collectedToolCalls.length;
                 collectedToolCalls.push(tc);
                 emitToolCallDelta(tc, idx);
@@ -1360,7 +1623,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
               // the emulated call's input too (issue #38) — otherwise Claude
               // Code tries to Read the sandbox path and fails.
               for (const rawTc of parsed.toolCalls) {
-                const tc = sanitizeToolCall(rawTc);
+                const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
                 const idx = collectedToolCalls.length;
                 collectedToolCalls.push(tc);
                 emitToolCallDelta(tc, idx);
@@ -1480,7 +1743,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
               const tail = toolParser.flush();
               if (tail.text) emitContent(pathStreamText.feed(tail.text));
               for (const rawTc of tail.toolCalls) {
-                const tc = sanitizeToolCall(rawTc);
+                const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
                 const idx = collectedToolCalls.length;
                 collectedToolCalls.push(tc);
                 emitToolCallDelta(tc, idx);
@@ -1514,7 +1777,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
             // any preamble text, returning raw parseable JSON (or the
             // trimmed original when nothing parses).
             if (wantJson && accText) {
-              const cleaned = extractJsonPayload(accText);
+              const cleaned = stabilizeJsonPayload(accText, messages);
               if (cleaned) {
                 send({ id, object: 'chat.completion.chunk', created, model,
                   choices: [{ index: 0, delta: { content: cleaned }, finish_reason: null }] });

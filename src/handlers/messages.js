@@ -11,12 +11,55 @@
  * No buffering, so first-token latency matches the upstream Cascade stream.
  */
 
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { handleChatCompletions } from './chat.js';
 import { log } from '../config.js';
 
 function genMsgId() {
   return 'msg_' + randomUUID().replace(/-/g, '').slice(0, 24);
+}
+
+// Anthropic Messages API tool types whose execution lives on Anthropic's
+// servers, not the client. The proxy treats these as opt-out: it cannot
+// satisfy server_tool_result delivery without implementing each one
+// against Cascade, so they're stripped from the request rather than
+// translated into normal function tools.
+//   web_search_20250305     server-side web search
+//   code_execution_20250522 server-side python sandbox
+//   advisor_20260301        Anthropic Advisor Strategy (sonnet+opus pair)
+const SERVER_SIDE_ANTHROPIC_TOOL_TYPES = new Set([
+  'web_search_20250305',
+  'code_execution_20250522',
+  'advisor_20260301',
+]);
+
+function sha256Hex(value) {
+  return createHash('sha256').update(String(value || '')).digest('hex');
+}
+
+// Real Claude Code 2.1.120 traffic carries metadata.user_id as a
+// JSON-encoded string with shape {device_id, account_uuid, session_id}.
+// Older Anthropic SDK clients send a plain string. The proxy currently
+// derives callerKey from API key + IP/UA, which means every Claude Code
+// client behind the same key shares one cascade pool — leading to cross-
+// device session bleed. Extract a stable per-user tag from metadata so
+// the pool can isolate concurrent users.
+export function extractCallerSubKey(body) {
+  const userId = body?.metadata?.user_id;
+  if (typeof userId !== 'string' || !userId) return '';
+  let parsed = null;
+  try { parsed = JSON.parse(userId); } catch {}
+  let tag = '';
+  if (parsed && typeof parsed === 'object') {
+    tag = parsed.device_id || parsed.deviceId
+      || parsed.session_id || parsed.sessionId
+      || parsed.account_uuid || parsed.accountUuid
+      || '';
+  } else {
+    tag = userId;
+  }
+  if (!tag) return '';
+  return sha256Hex(tag).slice(0, 16);
 }
 
 // ─── Anthropic → OpenAI request translation ──────────────────
@@ -95,14 +138,55 @@ function anthropicToOpenAI(body) {
       for (const tr of toolResults) messages.push(tr);
     }
   }
-  const tools = (body.tools || []).map(t => ({
-    type: 'function',
-    function: {
-      name: t.name,
-      description: t.description || '',
-      parameters: t.input_schema || {},
-    },
-  }));
+  // Anthropic exposes a growing set of "server-side" tool types where
+  // the service itself runs the work and the client only opts in via
+  // type. The proxy can't honor any of these (each needs its own stage-2
+  // implementation - Cascade-side opus advisor pass, web-search bridge,
+  // sandbox code exec). Drop them silently from the OpenAI-shaped tools
+  // forwarded upstream; otherwise the upstream model is free to invent
+  // a normal function tool_use for "advisor" the client will never get
+  // a server_tool_result for.
+  const droppedServerTools = [];
+  const tools = (body.tools || []).reduce((acc, t) => {
+    if (t?.type && SERVER_SIDE_ANTHROPIC_TOOL_TYPES.has(t.type)) {
+      droppedServerTools.push(t.type);
+      return acc;
+    }
+    acc.push({
+      type: 'function',
+      function: {
+        name: t.name,
+        description: t.description || '',
+        parameters: t.input_schema || {},
+      },
+    });
+    return acc;
+  }, []);
+  if (droppedServerTools.length) {
+    log.info(`messages: dropped ${droppedServerTools.length} server-side tool(s) [${[...new Set(droppedServerTools)].join(',')}] - proxy does not implement them yet`);
+  }
+  // Claude Code 2.x and Anthropic SDK clients send response shape and
+  // reasoning controls inside body.output_config — output_config.effort
+  // mirrors OpenAI's reasoning_effort, and output_config.format carries
+  // structured-output schemas Anthropic-side instead of OpenAI's
+  // response_format. The internal handler speaks OpenAI dialect, so
+  // unwrap both here so chat.js sees them on the path it already knows.
+  const oc = body.output_config;
+  const ocEffort = oc?.effort;
+  const ocFormat = oc?.format;
+  let translatedResponseFormat = null;
+  if (ocFormat?.type === 'json_schema' && ocFormat.schema) {
+    translatedResponseFormat = {
+      type: 'json_schema',
+      json_schema: {
+        name: ocFormat.name || 'response',
+        schema: ocFormat.schema,
+        strict: ocFormat.strict !== false,
+      },
+    };
+  } else if (ocFormat?.type === 'json_object') {
+    translatedResponseFormat = { type: 'json_object' };
+  }
   return {
     model: body.model || 'claude-sonnet-4.6',
     messages,
@@ -114,6 +198,8 @@ function anthropicToOpenAI(body) {
     ...(body.stop_sequences ? { stop: body.stop_sequences } : {}),
     ...(body.tool_choice ? { tool_choice: mapAnthropicToolChoice(body.tool_choice) } : {}),
     ...(body.thinking ? { thinking: body.thinking } : {}),
+    ...(ocEffort ? { reasoning_effort: ocEffort } : {}),
+    ...(translatedResponseFormat ? { response_format: translatedResponseFormat } : {}),
   };
 }
 
@@ -123,11 +209,17 @@ export function annotateRiskyReadToolResult(content, { toolName = '', isError = 
   const isOversizeNoContent = isError
     && /file content \([^)]+\) exceeds maximum allowed size/i.test(content)
     && /use offset and limit parameters/i.test(content);
-  const isCachedStub = (
+  // Claude Code Read tool emits real file bodies in "<lineno>\t<line>" form.
+  // Stub strings (cached/unchanged/truncated) never use that prefix, so the
+  // presence of a line-numbered line means we're looking at actual content
+  // and keyword heuristics would only false-positive on user code/comments.
+  const looksLikeRealBody = /^\s*\d+\t/m.test(content);
+  const isCachedStub = !looksLikeRealBody && (
     /(?:file )?(?:content )?(?:unchanged|cached)/i.test(content)
     || /(?:内容未变更|已缓存)/.test(content)
   ) && content.length < 2000;
-  const mentionsTruncation = /truncated|截断|丢失/.test(lower);
+  const mentionsTruncation = !looksLikeRealBody
+    && /truncated|截断|丢失/.test(lower);
   if (!isOversizeNoContent && !isCachedStub && !mentionsTruncation) return content;
 
   return `${content}\n\n[WindsurfAPI note: This Read result does not prove the full file body is available in the current conversation. If the task depends on full file contents, use Read with offset/limit or another content-bearing tool result before returning PASS.]`;
@@ -428,9 +520,17 @@ export async function handleMessages(body, context = {}) {
   const wantStream = !!body.stream;
   const openaiBody = anthropicToOpenAI(body);
   const chatHandler = context.handleChatCompletions || handleChatCompletions;
+  // Augment callerKey with the per-user tag from metadata.user_id when
+  // present so the cascade pool can isolate concurrent Claude Code users
+  // sharing one API key. Bare API-key callers and other client SDKs that
+  // do not send metadata.user_id keep the original callerKey unchanged.
+  const subKey = extractCallerSubKey(body);
+  const effectiveContext = subKey
+    ? { ...context, callerKey: `${context.callerKey || ''}:user:${subKey}` }
+    : context;
 
   if (!wantStream) {
-    const result = await chatHandler({ ...openaiBody, stream: false }, context);
+    const result = await chatHandler({ ...openaiBody, stream: false }, effectiveContext);
     if (result.status !== 200) {
       return {
         status: result.status,
@@ -449,7 +549,7 @@ export async function handleMessages(body, context = {}) {
   // Streaming path — ask handleChatCompletions for its streaming handler and
   // point its writes at our translator shim. This lets the upstream Cascade
   // poll loop drive the downstream SSE in real time — no buffer-then-replay.
-  const streamResult = await chatHandler({ ...openaiBody, stream: true }, context);
+  const streamResult = await chatHandler({ ...openaiBody, stream: true }, effectiveContext);
 
   if (!streamResult.stream) {
     // The OpenAI path returned a non-stream error (e.g. 403 model_not_entitled)
