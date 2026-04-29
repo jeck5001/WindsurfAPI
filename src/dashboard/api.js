@@ -10,6 +10,7 @@ import {
   isAuthenticated, probeAccount, ensureLsForAccount,
   refreshCredits, refreshAllCredits,
   setAccountBlockedModels, setAccountTokens, setAccountTier,
+  getAccountInternal, isLocalBindHost, maskApiKey, safeEqualString,
 } from '../auth.js';
 import { restartLsForProxy } from '../langserver.js';
 import { getLsStatus, stopLanguageServer, startLanguageServer, isLanguageServerRunning } from '../langserver.js';
@@ -24,27 +25,29 @@ import { windsurfLogin, refreshFirebaseToken, reRegisterWithCodeium } from './wi
 import { getModelAccessConfig, setModelAccessMode, setModelAccessList, addModelToList, removeModelFromList } from './model-access.js';
 import { checkMessageRateLimit } from '../windsurf-api.js';
 import { assertPublicUrlHost } from '../image.js';
+import { validateHostFormat } from '../net-safety.js';
+import { discoverWindsurfCredentials, isLoopbackAddress } from './local-windsurf.js';
 
-function maskApiKey(key = '') {
-  const s = String(key || '');
-  if (s.length <= 12) return s ? `${s.slice(0, 4)}***` : '';
-  return `${s.slice(0, 8)}***${s.slice(-4)}`;
+export function parseProxyUrl(proxy) {
+  const proxyParts = String(proxy).match(/^(?:(\w+):\/\/)?(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$/);
+  if (!proxyParts) return null;
+  return {
+    type: proxyParts[1] || 'http',
+    host: proxyParts[4],
+    port: parseInt(proxyParts[5]),
+    username: proxyParts[2] || '',
+    password: proxyParts[3] || '',
+  };
 }
 
 export function buildBatchProxyBinding(result, proxy) {
   const accountId = result?.account?.id || null;
   if (!result?.success || !proxy || !accountId) return null;
-  const proxyParts = String(proxy).match(/^(?:(\w+):\/\/)?(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$/);
-  if (!proxyParts) return null;
+  const parsed = parseProxyUrl(proxy);
+  if (!parsed) return null;
   return {
     accountId,
-    proxy: {
-      type: proxyParts[1] || 'http',
-      host: proxyParts[4],
-      port: parseInt(proxyParts[5]),
-      username: proxyParts[2] || '',
-      password: proxyParts[3] || '',
-    },
+    proxy: parsed,
   };
 }
 
@@ -65,9 +68,9 @@ function checkAuth(req) {
   // ?pwd= query passwords would only leak into URL access logs and
   // browser history without any callers needing them.
   const pw = req.headers['x-dashboard-password'] || '';
-  if (config.dashboardPassword) return pw === config.dashboardPassword;
-  if (config.apiKey) return pw === config.apiKey;
-  return true;
+  if (config.dashboardPassword) return safeEqualString(pw, config.dashboardPassword);
+  if (config.apiKey) return safeEqualString(pw, config.apiKey);
+  return isLocalBindHost();
 }
 
 async function processWindsurfLogin({ email, password, loginProxy, autoAdd }) {
@@ -101,7 +104,15 @@ async function processWindsurfLogin({ email, password, loginProxy, autoAdd }) {
 
   return {
     success: true,
-    apiKey_masked: maskApiKey(result.apiKey),
+    // When autoAdd:false, the caller is doing a one-time login to retrieve the
+    // upstream key without storing it (e.g. external tooling that wants the
+    // raw key) — they need the full apiKey. When autoAdd is true, the key is
+    // already persisted in the pool and the response only echoes a masked
+    // form (the dashboard never needs the raw key in the listing path; the
+    // explicit reveal-key endpoint covers the rare per-account export case).
+    ...(autoAdd === false
+      ? { apiKey: result.apiKey }
+      : { apiKey_masked: maskApiKey(result.apiKey) }),
     name: result.name,
     email: result.email,
     apiServerUrl: result.apiServerUrl,
@@ -122,9 +133,14 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
   // ─── Auth ─────────────────────────────────────────────
   if (subpath === '/auth') {
-    const needsAuth = !!(config.dashboardPassword || config.apiKey);
-    if (!needsAuth) return json(res, 200, { required: false });
-    return json(res, 200, { required: true, valid: checkAuth(req) });
+    const hasSecret = !!(config.dashboardPassword || config.apiKey);
+    if (hasSecret) return json(res, 200, { required: true, valid: checkAuth(req) });
+    // No secret configured. On localhost binds the dashboard is open; on
+    // public binds checkAuth fails closed (see Fix 1 / Fix 3) so the UI must
+    // know auth is required-but-unconfigurable so it can prompt the operator
+    // to set DASHBOARD_PASSWORD or API_KEY rather than show a useless prompt.
+    if (isLocalBindHost()) return json(res, 200, { required: false });
+    return json(res, 200, { required: true, valid: false, locked: true });
   }
 
   // ─── Overview ─────────────────────────────────────────
@@ -272,14 +288,36 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
   if (subpath === '/accounts' && method === 'POST') {
     try {
-      let account;
-      if (body.api_key) {
-        account = addAccountByKey(body.api_key, body.label);
-      } else if (body.token) {
-        account = await addAccountByToken(body.token, body.label);
-      } else {
+      if (!body.api_key && !body.token) {
         return json(res, 400, { error: 'Provide api_key or token' });
       }
+
+      let parsedProxy = null;
+      if (body.proxy) {
+        parsedProxy = parseProxyUrl(body.proxy);
+        if (!parsedProxy) {
+          return json(res, 400, { error: 'ERR_PROXY_FORMAT_INVALID' });
+        }
+        try {
+          if (config.allowPrivateProxyHosts) {
+            await validateHostFormat(parsedProxy.host);
+          } else {
+            await assertPublicUrlHost(parsedProxy.host);
+          }
+        } catch (e) {
+          return json(res, 400, { error: e.message || 'ERR_PROXY_INVALID' });
+        }
+      }
+
+      const account = body.api_key
+        ? addAccountByKey(body.api_key, body.label)
+        : await addAccountByToken(body.token, body.label);
+
+      if (parsedProxy) {
+        setAccountProxy(account.id, parsedProxy);
+        ensureLsForAccount(account.id).catch(e => log.warn(`LS ensure failed: ${e.message}`));
+      }
+
       // Fire-and-forget probe so the UI gets tier info shortly after add
       probeAccount(account.id).catch(e => log.warn(`Auto-probe failed: ${e.message}`));
       return json(res, 200, {
@@ -289,6 +327,45 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
       });
     } catch (err) {
       return json(res, 400, { error: err.message });
+    }
+  }
+
+  // GET /accounts/import-local — discover Windsurf desktop client credentials
+  // Local-only hardening: must be bound to loopback host and remote socket
+  // must also be loopback, so reverse proxies on public binds cannot
+  // expose local desktop credentials.
+  if (subpath === '/accounts/import-local' && method === 'GET') {
+    if (!isLocalBindHost()) {
+      log.warn('local-windsurf import refused: dashboard not bound to loopback host');
+      return json(res, 403, { error: 'ERR_LOCAL_IMPORT_NOT_AVAILABLE_PUBLIC_BIND' });
+    }
+    const remote = req?.socket?.remoteAddress;
+    if (!isLoopbackAddress(remote)) {
+      log.warn(`local-windsurf import refused: non-loopback caller ${remote}`);
+      return json(res, 403, { error: 'ERR_LOCAL_IMPORT_LOOPBACK_ONLY', message: 'Local Windsurf import only available from 127.0.0.1' });
+    }
+    try {
+      const result = await discoverWindsurfCredentials();
+      log.info(`local-windsurf import: found ${result.accounts.length} account(s) across ${result.sources.filter(s => s.ok).length} source(s)`);
+      return json(res, 200, {
+        success: true,
+        accounts: result.accounts.map(a => ({
+          method: a.method,
+          apiKey: a.apiKey,
+          apiKeyMasked: a.apiKeyMasked,
+          email: a.email,
+          name: a.name,
+          apiServerUrl: a.apiServerUrl,
+          label: a.label,
+          source: a.source,
+        })),
+        sources: result.sources,
+        sqliteSupport: result.sqliteSupport,
+        platform: result.platform,
+      });
+    } catch (e) {
+      log.warn(`local-windsurf import failed: ${e.message}`);
+      return json(res, 500, { error: 'ERR_LOCAL_IMPORT_FAILED', message: e.message });
     }
   }
 
@@ -588,7 +665,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
           continue;
         }
         try {
-          const loginProxy = proxy ? { host: proxy } : getProxyConfig().global;
+          const loginProxy = proxy ? parseProxyUrl(proxy) : getProxyConfig().global;
           const result = await processWindsurfLogin({ email, password, loginProxy, autoAdd });
           const binding = buildBatchProxyBinding(result, proxy);
           if (binding) {
@@ -631,7 +708,12 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
       return json(res, 200, {
         success: true,
-        apiKey_masked: maskApiKey(apiKey),
+        // Same one-time-export contract as /windsurf-login: raw key returned
+        // only when autoAdd:false (caller takes the key themselves and we do
+        // not persist it). Otherwise mask for listings.
+        ...(autoAdd === false
+          ? { apiKey }
+          : { apiKey_masked: maskApiKey(apiKey) }),
         name,
         email: email || '',
         account: account ? { id: account.id, email: account.email, status: account.status } : null,
@@ -648,9 +730,10 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
     const list = getAccountList();
     const acct = list.find(a => a.id === rateLimitCheck[1]);
     if (!acct) return json(res, 404, { error: 'Account not found' });
+    const secret = getAccountInternal(acct.id);
     try {
       const proxy = getEffectiveProxy(acct.id) || null;
-      const result = await checkMessageRateLimit(acct.apiKey, proxy);
+      const result = await checkMessageRateLimit(secret.apiKey, proxy);
       return json(res, 200, { success: true, account: acct.email, ...result });
     } catch (err) {
       return json(res, 500, { error: err.message });
@@ -659,7 +742,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
 
   const revealKey = subpath.match(/^\/account\/([^/]+)\/reveal-key$/);
   if (revealKey && method === 'POST') {
-    const acct = getAccountList().find(a => a.id === revealKey[1]);
+    const acct = getAccountInternal(revealKey[1]);
     if (!acct) return json(res, 404, { error: 'Account not found' });
     return json(res, 200, { success: true, apiKey: acct.apiKey });
   }
@@ -668,8 +751,7 @@ export async function handleDashboardApi(method, subpath, body, req, res) {
   // POST /accounts/:id/refresh-token — manually refresh Firebase token
   const tokenRefresh = subpath.match(/^\/accounts\/([^/]+)\/refresh-token$/);
   if (tokenRefresh && method === 'POST') {
-    const list = getAccountList();
-    const acct = list.find(a => a.id === tokenRefresh[1]);
+    const acct = getAccountInternal(tokenRefresh[1]);
     if (!acct) return json(res, 404, { error: 'Account not found' });
     if (!acct.refreshToken) return json(res, 400, { error: 'Account has no refresh token' });
     try {
@@ -733,7 +815,11 @@ async function gitStatus() {
 }
 
 async function testProxy({ host, port, username, password, type }) {
-  await assertPublicUrlHost(host);
+  if (config.allowPrivateProxyHosts) {
+    await validateHostFormat(host);
+  } else {
+    await assertPublicUrlHost(host);
+  }
   const { isSocks, createSocksTunnel } = await import('../socks.js');
   const tls = await import('node:tls');
   const targetHost = 'api.ipify.org';

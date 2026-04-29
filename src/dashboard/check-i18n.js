@@ -44,7 +44,9 @@ const CHINESE_REGEX = /[\u4e00-\u9fff]/;
 
 // Patterns that are allowed to contain Chinese (whitelisted)
 const WHITELIST_PATTERNS = [
-  /data-i18n=/,  // i18n attributes are ok
+  /data-i18n(?:-[\w-]+)?=/,  // i18n attributes are ok
+  /id="lang-indicator"/, // compact language toggle label
+  /indicator\.textContent\s*=/, // compact language toggle label
   /\/\/.*/,      // comments
   /https?:\/\//,  // URLs
   /windsurf\.com/, // windsurf domain
@@ -169,6 +171,7 @@ while ((match = i18nRegex.exec(htmlContent)) !== null) {
 // Check if all used keys exist in locales
 const missingInLocales = [];
 for (const key of usedKeys) {
+  if (key.includes('${')) continue;
   // Navigate nested key path
   const parts = key.split('.');
   let enVal = enJson;
@@ -208,10 +211,12 @@ while ((match = i18nCallRegex.exec(htmlContent)) !== null) {
 const i18nVarRegex = /I18n\.t\(\s*([^)]+)\s*\)/g;
 while ((match = i18nVarRegex.exec(htmlContent)) !== null) {
   const keyExpr = match[1].trim();
-  // Skip if it's a variable expression (not a string literal)
-  if (!/^[`'"']/.test(keyExpr) && !/^\${/.test(keyExpr) && keyExpr !== 'key') {
-    jsKeys.push(keyExpr);
-  }
+  // Skip quoted strings (already captured), template literals, and bare identifiers
+  // (variables like `key`, `errKey`, `errCode` — runtime-resolved, not literal keys)
+  if (/^[`'"']/.test(keyExpr)) continue;
+  if (/^\${/.test(keyExpr)) continue;
+  if (/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(keyExpr)) continue;
+  jsKeys.push(keyExpr);
 }
 
 // Deduplicate
@@ -221,7 +226,7 @@ const uniqueJsKeys = [...new Set(jsKeys)];
 const missingJsKeys = [];
 for (const key of uniqueJsKeys) {
   // Skip template expressions and variables
-  if (key.includes('${') || key === 'key' || key.includes('?') || key.includes('vars')) continue;
+  if (key.includes('${') || key === 'key' || key.includes('?') || key.includes('vars') || key.endsWith('.') || key.includes('+')) continue;
 
   // Navigate nested key path
   const parts = key.split('.');

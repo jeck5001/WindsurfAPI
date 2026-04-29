@@ -96,7 +96,9 @@
     "selectAll": "全选",
     "selectNone": "全不选",
     "invert": "反选",
-    "showPassword": "显示/隐藏密码"
+    "showPassword": "显示/隐藏密码",
+    "revealKey": "点击显示并复制完整 API Key",
+    "importLocal": "从本地 Windsurf 导入"
   },
 
   "status": {
@@ -237,6 +239,10 @@
       "title": "系统提示词",
       "desc": "工具注入、对话模式等内置提示词模板。修改后立即生效，点「重置」恢复默认。"
     },
+    "skin": {
+      "title": "界面风格",
+      "desc": "控制台外观。默认现代风；手绘草稿风是实验性简化布局。切换后页面会刷新。"
+    },
     "lsPool": {
       "title": "语言服务器池",
       "desc": "{{count}} 个 LS 实例 · 每个独立代理对应一个进程",
@@ -289,6 +295,12 @@
     "tokenGuideEnd": " 登录后复制 Token 粘贴到下面就行 所有登录方式（邮箱/Google/GitHub）都能用"
   },
 
+  "skin": {
+    "modern": "默认现代风",
+    "sketch": "手绘草稿风（实验）",
+    "hint": "选择后立即写入 cookie 并刷新"
+  },
+
   "field": {
     "email": {
       "label": "邮箱",
@@ -327,6 +339,11 @@
     "label": {
       "label": "标签",
       "placeholder": "可选"
+    },
+    "proxy": {
+      "label": "代理",
+      "placeholder": "http://proxy:8080 或 socks5://user:pass@host:port（可选）",
+      "hint": "留空则使用全局代理设置"
     },
     "batchInput": {
       "label": "批量导入",
@@ -497,7 +514,12 @@
     "title": "控制台登录",
     "subtitle": "请输入管理密码以继续",
     "passwordPlaceholder": "Dashboard 密码",
-    "button": "登 录"
+    "button": "登 录",
+    "checking": "验证中…",
+    "wrong": "密码不正确",
+    "empty": "请输入密码",
+    "locked": "后端未配置密码：请在服务端设置 DASHBOARD_PASSWORD 或 API_KEY 环境变量并重启",
+    "networkError": "无法连接服务器"
   },
 
   "range": {
@@ -615,6 +637,11 @@
     "github": "GitHub 登录",
     "copyAuthToken": "复制 Auth Token",
     "pasteToken": "去账号管理粘贴 Token",
+    "inlineTokenTitle": "或者直接粘贴 Auth Token（推荐 OAuth-only 账号用这个）",
+    "inlineTokenDesc": "点左边按钮在新 tab 打开 windsurf.com → 用 Google/GitHub 登录 → 页面会显示 Auth Token → 复制粘到右边输入框 → 点添加",
+    "openWindsurfToken": "打开 windsurf.com 拿 Token",
+    "tokenPlaceholder": "粘贴 Auth Token...",
+    "addWithToken": "用 Token 添加",
     "status": {
       "loading": "正在通过 {{provider}} 登录...",
       "success": "登录成功 {{email}} 已加入账号池",
@@ -655,6 +682,19 @@
     "placeholderSaved": "已保存（留空保持原值）",
     "placeholderPassword": "代理认证密码",
     "auth": "认证"
+  },
+
+  "localImport": {
+    "scanning": "正在扫描本地 Windsurf 客户端…",
+    "empty": "没找到已登录的本地 Windsurf 凭证",
+    "scannedPaths": "已扫描的位置",
+    "found": "条凭证",
+    "foundCount": "找到 {{count}} 个本地账号 — 检查无误后点导入",
+    "account": "账号",
+    "key": "API Key",
+    "source": "来源",
+    "importBtn": "导入",
+    "importSuccess": "已导入 {{email}}"
   },
 
   "account": {
@@ -851,7 +891,9 @@
     "ERR_FORMAT_INVALID": "格式错误 需要 [proxy] email password",
     "ERR_IDTOKEN_REQUIRED": "缺少 idToken",
     "ERR_PROXY_PRIVATE_IP": "代理地址不能指向内网/本机",
+    "ERR_PROXY_FORMAT_INVALID": "代理格式错误，应为：protocol://[user:pass@]host:port",
     "ERR_PROXY_HTTP_ERROR": "代理返回 HTTP 错误",
+    "ERR_PROXY_PRIVATE_HOST": "内网/本地主机不允许",
     "ERR_CONNECTION_FAILED": "连接失败",
     "ERR_TIMEOUT": "超时（10s）",
     "ERR_TLS_TUNNEL_ERROR": "TLS 隧道建立但返回内容异常",
@@ -868,12 +910,16 @@
     "ERR_AUTH1_TOKEN_MISSING": "Auth1 回应缺少 token",
     "ERR_POSTAUTH_FAILED": "Windsurf PostAuth 失败",
     "ERR_TOKEN_FETCH_FAILED": "获取一次性 Auth Token 失败",
-    "ERR_FIREBASE_TOKEN_MISSING": "Firebase 回应缺少 idToken"
+    "ERR_FIREBASE_TOKEN_MISSING": "Firebase 回应缺少 idToken",
+    "ERR_LOCAL_IMPORT_LOOPBACK_ONLY": "本地导入仅限 127.0.0.1 访问 — 请在部署服务器本机的浏览器里打开 dashboard，不要用公网域名",
+    "ERR_LOCAL_IMPORT_FAILED": "扫描本地 Windsurf 凭证失败"
   },
 
   "footer": {
     "version": "版本",
-    "langToggle": "切换语言"
+    "langToggle": "切换语言",
+    "langToggleToEn": "Switch to English",
+    "langToggleToZh": "切换到中文"
   },
 
   "placeholder": {

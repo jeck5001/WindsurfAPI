@@ -96,7 +96,9 @@
     "selectAll": "Select All",
     "selectNone": "Select None",
     "invert": "Invert",
-    "showPassword": "Show/Hide Password"
+    "showPassword": "Show/Hide Password",
+    "revealKey": "Click to reveal and copy full API key",
+    "importLocal": "Import from local Windsurf"
   },
 
   "status": {
@@ -237,6 +239,10 @@
       "title": "System Prompts",
       "desc": "Tool injection, conversation mode and other built-in prompt templates. Changes take effect immediately; click \"Reset\" to restore defaults."
     },
+    "skin": {
+      "title": "Interface Style",
+      "desc": "Dashboard appearance. Modern is the default; sketch is an experimental simplified layout. The page refreshes after switching."
+    },
     "lsPool": {
       "title": "Language Server Pool",
       "desc": "{{count}} LS instances · one process per dedicated proxy",
@@ -287,6 +293,12 @@
     "token": "Recommended: Use Token method. Visit {{link}} after logging in, copy the Token and paste below. Works with all login methods (Email/Google/GitHub).",
     "tokenGuide": "Recommended: Use Token method. Visit ",
     "tokenGuideEnd": " after logging in, copy the Token and paste below. Works with all login methods (Email/Google/GitHub)."
+  },
+
+  "skin": {
+    "modern": "Modern",
+    "sketch": "Sketch (Experimental)",
+    "hint": "Saved to cookie and refreshed immediately"
   },
 
   "field": {
@@ -344,6 +356,11 @@
     "label": {
       "label": "Label",
       "placeholder": "Optional"
+    },
+    "proxy": {
+      "label": "Proxy",
+      "placeholder": "http://proxy:8080 or socks5://user:pass@host:port (optional)",
+      "hint": "Leave empty to use global proxy settings"
     },
     "batchInput": {
       "label": "Batch Import",
@@ -497,7 +514,12 @@
     "title": "Control Panel Login",
     "subtitle": "Please enter the admin password to continue",
     "passwordPlaceholder": "Dashboard Password",
-    "button": "Login"
+    "button": "Login",
+    "checking": "Checking…",
+    "wrong": "Wrong password",
+    "empty": "Password required",
+    "locked": "Backend has no password configured — set DASHBOARD_PASSWORD or API_KEY env and restart",
+    "networkError": "Cannot reach server"
   },
 
   "range": {
@@ -615,6 +637,11 @@
     "github": "GitHub Login",
     "copyAuthToken": "Copy Auth Token",
     "pasteToken": "Paste Token in Account Management",
+    "inlineTokenTitle": "Or paste Auth Token directly (recommended for OAuth-only accounts)",
+    "inlineTokenDesc": "Click the left button to open windsurf.com in a new tab → sign in with Google/GitHub → page shows Auth Token → copy and paste into the input on the right → click Add",
+    "openWindsurfToken": "Open windsurf.com for Token",
+    "tokenPlaceholder": "Paste Auth Token...",
+    "addWithToken": "Add via Token",
     "status": {
       "loading": "Logging in via {{provider}}...",
       "success": "Login successful! {{email}} added to pool",
@@ -655,6 +682,19 @@
     "placeholderSaved": "Saved (leave empty to keep)",
     "placeholderPassword": "Proxy auth password",
     "auth": "Auth"
+  },
+
+  "localImport": {
+    "scanning": "Scanning local Windsurf client…",
+    "empty": "No logged-in local Windsurf credentials found",
+    "scannedPaths": "Scanned paths",
+    "found": "credential(s)",
+    "foundCount": "Found {{count}} local account(s) — review and click Import",
+    "account": "Account",
+    "key": "API Key",
+    "source": "Source",
+    "importBtn": "Import",
+    "importSuccess": "Imported {{email}}"
   },
 
   "account": {
@@ -851,7 +891,9 @@
     "ERR_FORMAT_INVALID": "Invalid format. Expected: [proxy] email password",
     "ERR_IDTOKEN_REQUIRED": "ID token is required",
     "ERR_PROXY_PRIVATE_IP": "Proxy cannot point to private/local address",
+    "ERR_PROXY_FORMAT_INVALID": "Invalid proxy format. Expected: protocol://[user:pass@]host:port",
     "ERR_PROXY_HTTP_ERROR": "Proxy returned HTTP error",
+    "ERR_PROXY_PRIVATE_HOST": "Private/local host is not allowed",
     "ERR_CONNECTION_FAILED": "Connection failed",
     "ERR_TIMEOUT": "Timeout (10s)",
     "ERR_TLS_TUNNEL_ERROR": "TLS tunnel established but returned abnormal content",
@@ -868,12 +910,16 @@
     "ERR_AUTH1_TOKEN_MISSING": "Auth1 response missing token",
     "ERR_POSTAUTH_FAILED": "Windsurf PostAuth failed",
     "ERR_TOKEN_FETCH_FAILED": "Failed to fetch one-time auth token",
-    "ERR_FIREBASE_TOKEN_MISSING": "Firebase response missing idToken"
+    "ERR_FIREBASE_TOKEN_MISSING": "Firebase response missing idToken",
+    "ERR_LOCAL_IMPORT_LOOPBACK_ONLY": "Local import only available from 127.0.0.1 — open the dashboard from the host machine itself, not via a public domain",
+    "ERR_LOCAL_IMPORT_FAILED": "Failed to scan local Windsurf credentials"
   },
 
   "footer": {
     "version": "Version",
-    "langToggle": "Switch language"
+    "langToggle": "Switch language",
+    "langToggleToEn": "Switch to English",
+    "langToggleToZh": "切换到中文"
   },
 
   "placeholder": {

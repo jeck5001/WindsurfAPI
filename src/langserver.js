@@ -13,6 +13,7 @@ import { mkdirSync } from 'fs';
 import { existsSync } from 'fs';
 import http2 from 'http2';
 import net from 'net';
+import { randomUUID } from 'crypto';
 import { resolve } from 'path';
 import { log } from './config.js';
 import { closeSessionForPort } from './grpc.js';
@@ -116,6 +117,48 @@ function isPortInUse(port) {
   });
 }
 
+export function probeLanguageServerPort(port, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const client = http2.connect(`http://localhost:${port}`);
+    let settled = false;
+    let req = null;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { req?.close(); } catch {}
+      try { client.close(); } catch {}
+      resolve(ok);
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    client.on('error', () => finish(false));
+    client.on('connect', () => {
+      try {
+        req = client.request({
+          ':method': 'GET',
+          ':path': '/exa.language_server_pb.LanguageServerService/GetUserStatus',
+          'x-codeium-csrf-token': DEFAULT_CSRF,
+        });
+        req.on('response', (headers) => {
+          const contentType = String(headers['content-type'] || '').toLowerCase();
+          const server = String(headers.server || '').toLowerCase();
+          const hasGrpcStatus = headers['grpc-status'] != null || headers['grpc-message'] != null;
+          const looksLikeLs = hasGrpcStatus
+            || contentType.includes('grpc')
+            || contentType.includes('connect')
+            || /grpc|connect/.test(server);
+          finish(looksLikeLs);
+        });
+        req.on('error', () => finish(false));
+        req.on('end', () => finish(false));
+        req.end();
+      } catch {
+        finish(false);
+      }
+    });
+  });
+}
+
 async function waitPortReady(port, timeoutMs = 20000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -154,17 +197,19 @@ export async function ensureLs(proxy = null) {
     const isDefault = key === 'default';
     let port = isDefault ? DEFAULT_PORT : _nextPort++;
 
-    // If something is already listening on the default port (e.g. leftover
-    // from a previous crashed run), adopt it rather than fight for the port.
+    // If something is already listening on the default port, NEVER adopt
+    // blindly — even a probe-based gRPC signature is spoofable by any local
+    // process serving HTTP/2 with a `server: *grpc*` header (verified). The
+    // adoption flow used to send account API keys to whatever was listening,
+    // which is unacceptable for a public-facing proxy. Instead, walk to the
+    // next free port and spawn a fresh LS there. Operator gives up the
+    // post-crash "adopt the orphan" convenience; in exchange, a malicious or
+    // accidental local process can no longer receive credentials.
     if (isDefault && await isPortInUse(port)) {
-      log.info(`LS default port ${port} already in use — adopting existing instance`);
-      const entry = {
-        process: null, port, csrfToken: DEFAULT_CSRF,
-        proxy: null, startedAt: Date.now(), ready: true,
-        workspaceInit: null, sessionId: null,
-      };
-      _pool.set(key, entry);
-      return entry;
+      log.warn(`LS default port ${port} already in use; starting LS on next free port instead of adopting (security)`);
+      do {
+        port = _nextPort++;
+      } while (await isPortInUse(port));
     }
 
     // Non-default ports: skip anything already bound. A PM2 restart can
@@ -241,7 +286,10 @@ export async function ensureLs(proxy = null) {
         // replacement LS opens a fresh one instead of writing into a
         // dead socket (grpc.js caches one session per port).
         closeSessionForPort(gone.port);
-        import('./conversation-pool.js').then(m => m.invalidateFor({ lsPort: gone.port })).catch(() => {});
+        // v2.0.25 LOW-1: pass the dead LS's generation so a new LS that
+        // already came up on the same port keeps its entries.
+        const goneGen = gone.generation;
+        import('./conversation-pool.js').then(m => m.invalidateFor({ lsPort: gone.port, lsGeneration: goneGen })).catch(() => {});
       }
     });
     proc.on('error', (err) => {
@@ -265,6 +313,10 @@ export async function ensureLs(proxy = null) {
     const entry = {
       process: proc, port, csrfToken: DEFAULT_CSRF,
       proxy, startedAt: Date.now(), ready: false,
+      // v2.0.25 LOW-1: per-spawn UUID so the conversation pool can tell a
+      // new LS that landed on the same port apart from the dead one. Used
+      // by checkout(expected={lsGeneration}) and invalidateFor({lsGeneration}).
+      generation: randomUUID(),
       // One-shot Cascade workspace init promise. cascadeChat() awaits this so
       // the heavy InitializePanelState / AddTrackedWorkspace / UpdateWorkspaceTrust
       // trio only runs once per LS lifetime instead of once per request.
@@ -303,6 +355,17 @@ export async function restartLsForProxy(proxy) {
   const entry = _pool.get(key);
   if (entry?.process) {
     try { entry.process.kill('SIGTERM'); } catch {}
+  }
+  if (entry?.port) {
+    // v2.0.25 LOW-1: same-port LS replacement opens a window where stale
+    // pool entries from the old LS could resume against the new LS's
+    // session. Close the cached HTTP/2 session and invalidate this LS's
+    // generation in the conversation pool synchronously, then spawn fresh.
+    closeSessionForPort(entry.port);
+    try {
+      const m = await import('./conversation-pool.js');
+      m.invalidateFor({ lsPort: entry.port, lsGeneration: entry.generation });
+    } catch {}
   }
   _pool.delete(key);
   return ensureLs(proxy);
@@ -351,11 +414,24 @@ export async function startLanguageServer(opts = {}) {
 }
 
 export function stopLanguageServer() {
+  // v2.0.25 LOW-1: tear down ALL conversation pool entries pinned to LSes
+  // we're about to kill, so the dashboard restart path doesn't leak dead
+  // cascade ids into the next LS's session window.
+  const portsToClose = [];
   for (const [key, entry] of _pool) {
     try { entry.process?.kill('SIGTERM'); } catch {}
+    if (entry?.port) portsToClose.push({ port: entry.port, generation: entry.generation });
     log.info(`LS instance ${key} stopped`);
   }
   _pool.clear();
+  if (portsToClose.length) {
+    import('./conversation-pool.js').then(m => {
+      for (const p of portsToClose) {
+        closeSessionForPort(p.port);
+        m.invalidateFor({ lsPort: p.port, lsGeneration: p.generation });
+      }
+    }).catch(() => {});
+  }
 }
 
 export function isLanguageServerRunning() {

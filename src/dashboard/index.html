@@ -1521,8 +1521,8 @@ window._firebaseOAuth = async function(provider) {
     </div>
   </nav>
   <div class="footer">
-    <button class="btn btn-ghost btn-xs" onclick="App.toggleLang()" title="Switch language" style="margin-right:8px">
-      <span id="lang-indicator">中</span> / EN
+    <button id="lang-toggle-btn" class="btn btn-ghost btn-xs" onclick="App.toggleLang()" title="Switch language" style="margin-right:8px">
+      <span id="lang-indicator">中文</span>
     </button>
     <span>© Windsurf</span>
     <span class="ver" id="sidebar-ver" data-i18n-title="footer.version" title="版本">v1.2.0</span>
@@ -1651,6 +1651,25 @@ window._firebaseOAuth = async function(provider) {
       </div>
     </div>
 
+    <div class="section hidden" id="wl-result"></div>
+
+    <div class="section">
+      <div class="section-header">
+        <div>
+          <div class="section-title" data-i18n="section.loginHistory.title">登录历史</div>
+          <div class="section-desc" data-i18n="section.loginHistory.desc">本地记录最近 50 条登录操作</div>
+        </div>
+      </div>
+      <div class="section-body tight">
+        <div class="table-wrap">
+          <table id="wl-history-table">
+            <thead><tr><th data-i18n="table.header.time">时间</th><th data-i18n="table.header.email">邮箱</th><th data-i18n="table.header.status">状态</th><th data-i18n="table.header.proxy">代理</th><th data-i18n="table.header.action">操作</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div class="section" id="wl-proxy-section">
       <div class="section-header">
         <div>
@@ -1691,25 +1710,6 @@ window._firebaseOAuth = async function(provider) {
             <span data-i18n="proxy.test.button">测试代理</span>
           </button>
           <span id="wl-proxy-test-result" class="text-sm text-muted"></span>
-        </div>
-      </div>
-    </div>
-
-    <div class="section hidden" id="wl-result"></div>
-
-    <div class="section">
-      <div class="section-header">
-        <div>
-          <div class="section-title" data-i18n="section.loginHistory.title">登录历史</div>
-          <div class="section-desc" data-i18n="section.loginHistory.desc">本地记录最近 50 条登录操作</div>
-        </div>
-      </div>
-      <div class="section-body tight">
-        <div class="table-wrap">
-          <table id="wl-history-table">
-            <thead><tr><th data-i18n="table.header.time">时间</th><th data-i18n="table.header.email">邮箱</th><th data-i18n="table.header.status">状态</th><th data-i18n="table.header.proxy">代理</th><th data-i18n="table.header.action">操作</th></tr></thead>
-            <tbody></tbody>
-          </table>
         </div>
       </div>
     </div>
@@ -1764,9 +1764,18 @@ window._firebaseOAuth = async function(provider) {
             <input id="acc-label" class="input" data-i18n-placeholder="field.label.placeholder" placeholder="可选">
           </div>
         </div>
+        <div class="field-row" style="margin-top:12px">
+          <div class="field" style="flex:1">
+            <label class="field-label" data-i18n="field.proxy.label">代理</label>
+            <input id="acc-proxy" class="input" data-i18n-placeholder="field.proxy.placeholder" placeholder="http://proxy:8080 或 socks5://user:pass@host:port（可选）">
+          </div>
+        </div>
+        <div class="field-hint" style="margin-top:4px" data-i18n="field.proxy.hint">留空则使用全局代理设置</div>
         <div class="field-row-actions">
           <button class="btn btn-primary" onclick="App.addAccount()" data-i18n="action.add">添加账号</button>
+          <button class="btn btn-outline" onclick="App.discoverLocalWindsurf()" data-i18n="action.importLocal" title="从本地 Windsurf 客户端读取已登录的凭证（仅本机访问）">从本地 Windsurf 导入</button>
         </div>
+        <div id="local-windsurf-result" style="margin-top:12px"></div>
       </div>
     </div>
 
@@ -1893,7 +1902,7 @@ window._firebaseOAuth = async function(provider) {
             <label class="field-label" data-i18n="field.passwordProxy.label">密码</label>
             <div class="input-group">
               <input id="proxy-pass" class="input" type="password" data-i18n-placeholder="field.proxyPass.placeholder" placeholder="代理认证密码">
-              <button class="btn btn-outline btn-icon" onclick="const el=document.getElementById('proxy-pass');el.type=el.type==='password'?'text':'password'" title="显示/隐藏">
+              <button class="btn btn-outline btn-icon" onclick="const el=document.getElementById('proxy-pass');el.type=el.type==='password'?'text':'password'" data-i18n-title="action.showPassword" title="显示/隐藏密码">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
               </button>
             </div>
@@ -2024,8 +2033,9 @@ window._firebaseOAuth = async function(provider) {
             <div class="chart-subtitle" data-i18n="section.modelPie.desc">前 8 个模型的请求量占比</div>
           </div>
         </div>
-        <div class="chart-pie-body">
+        <div class="chart-pie-body" style="position:relative">
           <canvas id="model-pie-canvas"></canvas>
+          <div class="chart-tooltip" id="model-pie-tooltip"></div>
           <div class="pie-legend" id="model-pie-legend"></div>
         </div>
       </div>
@@ -2189,7 +2199,8 @@ window._firebaseOAuth = async function(provider) {
     <h3 data-i18n="login.title">控制台登录</h3>
     <p data-i18n="login.subtitle">请输入管理密码以继续</p>
     <input type="password" id="login-password" class="input" data-i18n-placeholder="login.passwordPlaceholder" placeholder="Dashboard 密码" onkeydown="if(event.key==='Enter')App.login()">
-    <button class="btn btn-primary" onclick="App.login()" data-i18n="login.button">登 录</button>
+    <button class="btn btn-primary" id="login-btn" onclick="App.login()" data-i18n="login.button">登 录</button>
+    <div id="login-error" style="margin-top:12px;color:var(--error);font-size:13px;min-height:18px"></div>
   </div>
 </div>
 
@@ -2295,8 +2306,11 @@ const I18n = {
     document.documentElement.lang = this.locale === 'zh' || this.locale === 'zh-CN' ? 'zh-CN' : 'en';
 
     // Update language indicator
+    const zhMode = this.locale === 'zh' || this.locale === 'zh-CN';
     const indicator = document.getElementById('lang-indicator');
-    if (indicator) indicator.textContent = (this.locale === 'zh' || this.locale === 'zh-CN') ? '中' : 'EN';
+    if (indicator) indicator.textContent = zhMode ? '中文' : 'English';
+    const toggleBtn = document.getElementById('lang-toggle-btn');
+    if (toggleBtn) toggleBtn.title = I18n.t(zhMode ? 'footer.langToggleToEn' : 'footer.langToggleToZh');
   },
 
   async setLocale(lang) {
@@ -2336,10 +2350,24 @@ const App = {
     I18n.apply();
   },
 
-  toggleLang() {
+  async toggleLang() {
     const newLang = I18n.locale === 'zh' || I18n.locale === 'zh-CN' ? 'en' : 'zh';
-    I18n.setLocale(newLang);
+    await I18n.setLocale(newLang);
     this.lang = newLang;
+    this.refreshActivePanelI18n();
+  },
+
+  refreshActivePanelI18n() {
+    const activePanelId = document.querySelector('.panel.active')?.id?.replace(/^p-/, '');
+    if (!activePanelId) return;
+    const loaders = {
+      overview: 'loadOverview', 'windsurf-login': 'loadWindsurfLogin',
+      accounts: 'loadAccounts', models: 'loadModels', proxy: 'loadProxy',
+      logs: 'loadLogs', stats: 'loadStats', bans: 'loadBans',
+      experimental: 'loadExperimental', credits: 'loadCredits',
+    };
+    const loader = loaders[activePanelId];
+    if (loader && typeof this[loader] === 'function') this[loader]();
   },
 
   // Register a polling loader. Guarantees exactly one timer per key even if
@@ -2371,10 +2399,39 @@ const App = {
     else this.loadOverview();
   },
 
-  login() {
-    this.password = document.getElementById('login-password').value;
-    localStorage.setItem('dp', this.password);
-    this.init();
+  async login() {
+    const pw = document.getElementById('login-password').value;
+    const btn = document.getElementById('login-btn');
+    const errEl = document.getElementById('login-error');
+    if (errEl) errEl.textContent = '';
+    if (!pw) {
+      if (errEl) errEl.textContent = I18n.t('login.empty');
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.dataset.origLabel ||= btn.textContent; btn.textContent = I18n.t('login.checking'); }
+    try {
+      // Pre-flight: check the password against /auth before storing it so a
+      // wrong attempt actually shows feedback instead of silently re-rendering
+      // the same overlay (which looks like "no response" to users).
+      const r = await fetch('/dashboard/api/auth', { headers: { 'X-Dashboard-Password': pw } });
+      const data = await r.json().catch(() => ({}));
+      if (data.locked) {
+        if (errEl) errEl.textContent = I18n.t('login.locked');
+        return;
+      }
+      if (data.required && !data.valid) {
+        if (errEl) errEl.textContent = I18n.t('login.wrong');
+        document.getElementById('login-password')?.focus();
+        return;
+      }
+      this.password = pw;
+      localStorage.setItem('dp', pw);
+      await this.init();
+    } catch (e) {
+      if (errEl) errEl.textContent = I18n.t('login.networkError') + ': ' + e.message;
+    } finally {
+      if (btn) { btn.disabled = false; if (btn.dataset.origLabel) btn.textContent = btn.dataset.origLabel; }
+    }
   },
 
   navigate(panel) {
@@ -2705,7 +2762,9 @@ const App = {
     } catch (err) {
       status.style.color = '#ef4444';
       status.textContent = I18n.t('oauth.status.loginFailed', { label, error: err.message });
-      this.toast(I18n.t('toast.loginFailed', { label, error: err.message }), 'error');
+      const errKey = err.message ? `error.${err.message}` : null;
+      const translatedErr = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : err.message;
+      this.toast(I18n.t('toast.loginFailed', { label, error: translatedErr }), 'error');
     } finally {
       if (btn) btn.disabled = false;
     }
@@ -2723,7 +2782,9 @@ const App = {
   },
 
   getWindsurfProxyLabel(proxy) {
-    return proxy ? `${proxy.type}://${proxy.host}:${proxy.port}` : '全局';
+    if (!proxy) return I18n.t('proxy.global');
+    if (typeof proxy === 'string') return proxy;
+    return `${proxy.type}://${proxy.host}:${proxy.port}`;
   },
 
   pushLoginHistory(entry) {
@@ -2745,16 +2806,61 @@ const App = {
 
   getWindsurfLoginFailActions(r) {
     if (!r.isAuthFail) return '';
+    const inlineId = 'inline-token-' + Math.random().toString(36).slice(2, 8);
+    const emailAttr = this.esc(r.email || '');
     return `
       <div style="margin-top:12px;padding:12px;background:var(--surface-2);border-radius:var(--radius);border-left:3px solid var(--accent)">
         <div style="font-weight:600;margin-bottom:8px">${I18n.t('oauth.tryAnotherWay')}</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
           <button class="btn btn-sm" style="background:#4285F4;color:#fff" onclick="App.oauthLogin('google')">${I18n.t('oauth.google')}</button>
           <button class="btn btn-sm" style="background:#24292e;color:#fff" onclick="App.oauthLogin('github')">${I18n.t('oauth.github')}</button>
-          <a class="btn btn-sm btn-outline" href="https://windsurf.com/show-auth-token" target="_blank">${I18n.t('oauth.copyAuthToken')}</a>
-          <button class="btn btn-sm btn-ghost" onclick="document.querySelector('[data-panel=accounts]').click();setTimeout(()=>document.getElementById('acc-key')?.focus(),100)">${I18n.t('oauth.pasteToken')}</button>
+        </div>
+        <div style="border-top:1px dashed var(--border);padding-top:12px">
+          <div style="font-weight:600;margin-bottom:6px">${I18n.t('oauth.inlineTokenTitle')}</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">${I18n.t('oauth.inlineTokenDesc')}</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn btn-sm btn-outline" onclick="App.openWindsurfTokenUrl('${inlineId}')">${I18n.t('oauth.openWindsurfToken')}</button>
+            <input id="${inlineId}" type="text" class="input" style="flex:1;min-width:240px" placeholder="${I18n.t('oauth.tokenPlaceholder')}">
+            <button class="btn btn-sm btn-primary" onclick="App.addAccountFromInlineToken('${inlineId}','${emailAttr}')">${I18n.t('oauth.addWithToken')}</button>
+          </div>
         </div>
       </div>`;
+  },
+
+  openWindsurfTokenUrl(inputId) {
+    // Use the editor backup-token signin URL extracted from real Windsurf editor
+    // 2.0.67 (extension.js getLoginUrl with forceShowAuthToken:true). The
+    // public client_id is the canonical Windsurf editor identifier; using the
+    // full URL bypasses the auth-protected /show-auth-token landing's signin
+    // bounce and shows the token directly after OAuth completes.
+    const state = (crypto.getRandomValues ? Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('') : Math.random().toString(36).slice(2));
+    const url = 'https://windsurf.com/windsurf/signin?response_type=token&client_id=3GUryQ7ldAeKEuD2obYnppsnmj58eP5u&redirect_uri=show-auth-token&state=' + state + '&prompt=login&redirect_parameters_type=query&workflow=';
+    window.open(url, '_blank');
+    setTimeout(() => document.getElementById(inputId)?.focus(), 100);
+  },
+
+  async addAccountFromInlineToken(inputId, label) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    const token = input.value.trim();
+    if (!token) return this.toast(I18n.t('toast.enterKeyOrToken'), 'error');
+    const btn = input.nextElementSibling;
+    const originalDisabled = btn?.disabled;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await this.api('POST', '/accounts', { token, label });
+      if (r.success) {
+        this.toast(I18n.t('account.addSuccess'), 'success');
+        input.value = '';
+        this.loadAccounts();
+      } else {
+        this.toast(r.error || I18n.t('toast.addFailed'), 'error');
+      }
+    } catch (err) {
+      this.toast(err.message, 'error');
+    } finally {
+      if (btn) btn.disabled = originalDisabled || false;
+    }
   },
 
   renderSingleWindsurfLoginResult(r, autoAdd) {
@@ -2776,13 +2882,15 @@ const App = {
         </div>`);
       return;
     }
+    const errKey = r.error ? `error.${r.error}` : null;
+    const errMsg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('error.unknown'));
     this.showWindsurfLoginResult(`
       <div class="section-header">
         <div>
           <div class="section-title" style="color:var(--error)">${I18n.t('loginResult.fail')}</div>
         </div>
       </div>
-      <div class="section-body"><p class="text-sm">${this.esc(r.error || I18n.t('error.unknown'))}</p>${this.getWindsurfLoginFailActions(r)}</div>`);
+      <div class="section-body"><p class="text-sm">${this.esc(errMsg)}</p>${this.getWindsurfLoginFailActions(r)}</div>`);
   },
 
   renderBatchWindsurfLoginResult(results, autoAdd) {
@@ -2806,7 +2914,7 @@ const App = {
                   <td><span class="badge ${r.success ? 'active' : 'error'}">${r.success ? I18n.t('batch.success') : I18n.t('batch.fail')}</span></td>
                   <td class="text-sm">${r.success
                     ? `<span class="break-all"><code>${this.esc(r.apiKey_masked || (r.apiKey ? r.apiKey.slice(0, 16) + '...' : '-'))}</code>${r.account ? ` · ${I18n.t('table.header.account')} ${this.esc(r.account.id)}` : ''}</span>`
-                    : `<span style="color:var(--error)">${this.esc(r.error || I18n.t('error.unknown'))}</span>`}</td>
+                    : (() => { const errKey = r.error ? `error.${r.error}` : null; return `<span style="color:var(--error)">${this.esc((errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('error.unknown')))}</span>`; })()}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -2878,11 +2986,13 @@ const App = {
       } else {
         entry.status = 'error: ' + (r.error || 'unknown');
         this.renderSingleWindsurfLoginResult(r, autoAdd);
-        this.toast(r.error || I18n.t('toast.loginFailed'), 'error');
+        const errKey = r.error ? `error.${r.error}` : null;
+        this.toast((errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('toast.loginFailed')), 'error');
       }
     } catch (err) {
       entry.status = 'error: ' + err.message;
-      this.toast(err.message, 'error');
+      const errKey = err.message ? `error.${err.message}` : null;
+      this.toast((errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : err.message, 'error');
     }
 
     this.pushLoginHistory(entry);
@@ -2910,19 +3020,21 @@ const App = {
     try {
       const r = await this.api('POST', '/batch-import', { text: input, autoAdd });
       if (!r.success || !Array.isArray(r.results)) {
+        const errKey = r.error ? `error.${r.error}` : null;
         this.showWindsurfLoginResult(`
           <div class="section-header">
             <div><div class="section-title" style="color:var(--error)">${I18n.t('loginResult.fail')}</div></div>
           </div>
-          <div class="section-body"><p class="text-sm">${this.esc(r.error || I18n.t('error.unknown'))}</p></div>`);
-        return this.toast(r.error || I18n.t('batch.importFailed'), 'error');
+          <div class="section-body"><p class="text-sm">${this.esc((errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('error.unknown')))}</p></div>`);
+        const translatedErr = errKey && I18n.t(errKey) !== errKey ? I18n.t(errKey) : r.error;
+        return this.toast(translatedErr || I18n.t('batch.importFailed'), 'error');
       }
 
       this.renderBatchWindsurfLoginResult(r.results, autoAdd);
       this.pushLoginHistoryEntries(r.results.map(item => ({
           time: new Date().toISOString(),
           email: item.email,
-          proxy: this.getWindsurfProxyLabel(proxy),
+          proxy: this.getWindsurfProxyLabel(item.proxy),
           status: item.success ? 'success' : `error: ${item.error || 'unknown'}`,
           apiKey: item.success ? (item.apiKey_masked || (item.apiKey ? item.apiKey.slice(0, 16) + '...' : undefined)) : undefined,
         })));
@@ -2932,12 +3044,14 @@ const App = {
         document.getElementById('wl-batch-input').value = '';
       }
     } catch (err) {
+      const errKey = err.message ? `error.${err.message}` : null;
       this.showWindsurfLoginResult(`
         <div class="section-header">
           <div><div class="section-title" style="color:var(--error)">${I18n.t('loginResult.fail')}</div></div>
         </div>
-        <div class="section-body"><p class="text-sm">${this.esc(err.message)}</p></div>`);
-      this.toast(err.message, 'error');
+        <div class="section-body"><p class="text-sm">${this.esc((errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : err.message)}</p></div>`);
+      const translatedErr = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : err.message;
+      this.toast(translatedErr, 'error');
     } finally {
       btn.disabled = false;
       btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M3 5h18"/><path d="M3 12h18"/><path d="M3 19h18"/></svg> ' + I18n.t('action.batchImport');
@@ -2954,7 +3068,7 @@ const App = {
         <td>${this.esc(h.email)}</td>
         <td>
           <span class="badge ${ok ? 'active' : 'error'}">${ok ? I18n.t('batch.success') : I18n.t('batch.fail')}</span>
-          ${!ok ? `<div class="text-xs" style="color:var(--error);margin-top:3px;max-width:240px;overflow:hidden;text-overflow:ellipsis">${this.esc((h.status||'').replace('error: ',''))}</div>` : ''}
+          ${!ok ? (() => { const errCode = (h.status||'').replace('error: ',''); const errKey = `error.${errCode}`; const errMsg = I18n.t(errKey) !== errKey ? I18n.t(errKey) : errCode; return `<div class="text-xs" style="color:var(--error);margin-top:3px;max-width:240px;overflow:hidden;text-overflow:ellipsis" title="${this.esc(errCode)}">${this.esc(errMsg)}</div>`; })() : ''}
         </td>
         <td class="text-sm">${this.esc(h.proxy || '-')}</td>
         <td><button class="btn btn-ghost btn-xs" onclick="App.removeLoginHistory(${i})">${I18n.t('action.delete')}</button></td>
@@ -3127,7 +3241,7 @@ const App = {
         <td style="color:${a.errorCount > 0 ? 'var(--error)' : 'inherit'}">${a.errorCount}</td>
         <td class="text-sm nowrap">${a.lastUsed ? new Date(a.lastUsed).toLocaleString() : '-'}</td>
         <td class="nowrap">
-          <code style="cursor:pointer" title="${I18n.t('action.copyTitle')}" onclick="App.copyKey('${this.escJsAttr(a.apiKey)}')">${a.keyPrefix}</code>
+          <code title="${I18n.t('action.revealKey')}" style="cursor:pointer" onclick="App.revealAndCopyKey('${this.escJsAttr(a.id)}')">${this.esc(a.apiKey_masked || a.keyPrefix || '')}</code>
         </td>
         <td class="nowrap">
           <div class="btn-group">
@@ -3303,7 +3417,7 @@ const App = {
             </div>
             <div class="detail-kv">
               <span class="k">${T('runtime.accountId')}</span><span class="v"><code>${a.id}</code></span>
-              <span class="k">${T('runtime.apiKey')}</span><span class="v"><code style="cursor:pointer" onclick="App.copyKey('${this.escJsAttr(a.apiKey)}')" title="${I18n.t('action.copyTitle')}">${a.keyPrefix}</code></span>
+              <span class="k">${T('runtime.apiKey')}</span><span class="v"><code>${this.esc(a.apiKey_masked || a.keyPrefix || '')}</code></span>
               ${cr.lastError ? `<span class="k">${T('runtime.lastError')}</span><span class="v" style="color:var(--error);font-size:11px">${this.esc(cr.lastError).slice(0, 80)}</span>` : ''}
             </div>
           </div>
@@ -3519,11 +3633,72 @@ const App = {
     const type = document.getElementById('acc-type').value;
     const key = document.getElementById('acc-key').value.trim();
     const label = document.getElementById('acc-label').value.trim();
+    const proxy = document.getElementById('acc-proxy').value.trim();
     if (!key) return this.toast(I18n.t('toast.enterKeyOrToken'), 'error');
-    const body = type === 'api_key' ? { api_key: key, label } : { token: key, label };
+    const body = type === 'api_key' ? { api_key: key, label, proxy } : { token: key, label, proxy };
     const r = await this.api('POST', '/accounts', body);
-    if (r.success) { this.toast(I18n.t('account.addSuccess')); document.getElementById('acc-key').value = ''; document.getElementById('acc-label').value = ''; this.loadAccounts(); }
+    if (r.success) { this.toast(I18n.t('account.addSuccess')); document.getElementById('acc-key').value = ''; document.getElementById('acc-label').value = ''; document.getElementById('acc-proxy').value = ''; this.loadAccounts(); }
     else this.toast(r.error || I18n.t('toast.addFailed'), 'error');
+  },
+
+  async discoverLocalWindsurf() {
+    const root = document.getElementById('local-windsurf-result');
+    if (!root) return;
+    root.innerHTML = `<div class="text-sm" style="color:var(--text-muted)">${I18n.t('localImport.scanning')}</div>`;
+    try {
+      const r = await this.api('GET', '/accounts/import-local');
+      if (r.error) {
+        const errKey = r.error ? `error.${r.error}` : null;
+        const msg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.message || r.error);
+        root.innerHTML = `<div class="text-sm" style="color:var(--error)">${this.esc(msg)}</div>`;
+        return;
+      }
+      if (!r.accounts || r.accounts.length === 0) {
+        const sourcesHtml = (r.sources || []).map(s => `<li>${this.esc(s.path)} — ${s.ok ? `${s.accountCount} ${I18n.t('localImport.found')}` : this.esc(s.reason || 'unknown')}</li>`).join('');
+        root.innerHTML = `
+          <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);font-size:13px;line-height:1.6">
+            <div style="color:var(--warn);font-weight:600">${I18n.t('localImport.empty')}</div>
+            <div style="color:var(--text-muted);margin-top:4px">${I18n.t('localImport.scannedPaths')}：</div>
+            <ul style="margin:6px 0 0 18px;color:var(--text-muted);font-size:12px">${sourcesHtml}</ul>
+            <div style="color:var(--text-muted);margin-top:6px">SQLite: ${r.sqliteSupport} · ${r.platform}</div>
+          </div>`;
+        return;
+      }
+      const rows = r.accounts.map((a, i) => `
+        <tr>
+          <td>${this.esc(a.email || a.label || '-')}</td>
+          <td><code>${this.esc(a.apiKeyMasked)}</code></td>
+          <td class="text-xs" style="color:var(--text-muted)">${this.esc(a.source)}</td>
+          <td>
+            <button class="btn btn-sm btn-primary" onclick="App.importLocalWindsurfAccount(${i})">${I18n.t('localImport.importBtn')}</button>
+          </td>
+        </tr>`).join('');
+      this._localWindsurfAccounts = r.accounts;
+      root.innerHTML = `
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius)">
+          <div style="font-weight:600;margin-bottom:8px">${I18n.t('localImport.foundCount', { count: r.accounts.length })}</div>
+          <table class="table table-compact">
+            <thead><tr><th>${I18n.t('localImport.account')}</th><th>${I18n.t('localImport.key')}</th><th>${I18n.t('localImport.source')}</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+    } catch (e) {
+      root.innerHTML = `<div class="text-sm" style="color:var(--error)">${this.esc(e.message || String(e))}</div>`;
+    }
+  },
+
+  async importLocalWindsurfAccount(idx) {
+    const acc = this._localWindsurfAccounts?.[idx];
+    if (!acc) return;
+    const r = await this.api('POST', '/accounts', { api_key: acc.apiKey, label: acc.label });
+    if (r.success) {
+      this.toast(I18n.t('localImport.importSuccess', { email: acc.email || acc.label }));
+      this.loadAccounts();
+    } else {
+      const errKey = r.error ? `error.${r.error}` : null;
+      const msg = (errKey && I18n.t(errKey) !== errKey) ? I18n.t(errKey) : (r.error || I18n.t('toast.addFailed'));
+      this.toast(msg, 'error');
+    }
   },
 
   async toggleAccount(id, status) { await this.api('PATCH', `/accounts/${id}`, { status }); this.loadAccounts(); },
@@ -4385,6 +4560,50 @@ const App = {
     canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
   },
 
+  _bindPieHover() {
+    const canvas = document.getElementById('model-pie-canvas');
+    const tipEl  = document.getElementById('model-pie-tooltip');
+    if (!canvas || !tipEl || canvas._pieHoverBound) return;
+    canvas._pieHoverBound = true;
+    canvas.addEventListener('mousemove', (ev) => {
+      const hm = this._pieHitMap;
+      if (!hm) { tipEl.classList.remove('show'); return; }
+      const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const dx = x - hm.cx, dy = y - hm.cy;
+      const r = Math.hypot(dx, dy);
+      if (r < hm.rInner || r > hm.rOuter) { tipEl.classList.remove('show'); return; }
+      // Pie starts at -π/2 going clockwise. Normalize cursor angle into the
+      // same 0..2π space relative to the start angle so segment boundaries
+      // align with the drawn arcs.
+      let a = Math.atan2(dy, dx) + Math.PI / 2;
+      if (a < 0) a += Math.PI * 2;
+      const startAngle0 = -Math.PI / 2;
+      const seg = hm.segments.find(s => {
+        const sNorm = s.startAngle - startAngle0;
+        const eNorm = s.endAngle - startAngle0;
+        return a >= sNorm && a < eNorm;
+      });
+      if (!seg) { tipEl.classList.remove('show'); return; }
+      const pct = (seg.count / hm.total * 100).toFixed(1);
+      const successRate = seg.count > 0 ? (seg.success / seg.count * 100).toFixed(1) : '—';
+      tipEl.innerHTML = `
+        <div class="tt-time">${this.esc(seg.name)}</div>
+        <div class="tt-row"><span class="tt-dot" style="background:${seg.color}"></span><span class="tt-label">${I18n.t('section.requestChart.tooltipRequests')}</span><span class="tt-value">${seg.count} (${pct}%)</span></div>
+        <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipSuccess')}</span><span class="tt-value">${seg.success}</span></div>
+        <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipErrors')}</span><span class="tt-value">${seg.errors}</span></div>
+        <div class="tt-row"><span class="tt-label">${I18n.t('section.requestChart.tooltipRate')}</span><span class="tt-value">${successRate}%</span></div>
+      `;
+      tipEl.classList.add('show');
+      // Tooltip lives inside chart-pie-body (position:relative). Position it
+      // relative to that parent using cursor coords already in canvas space.
+      tipEl.style.left = x + 'px';
+      tipEl.style.top = Math.max(0, y - 12) + 'px';
+    });
+    canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
+  },
+
   _roundRect(ctx, x, y, w, h, r) {
     if (h <= 0 || w <= 0) return;
     const rr = Math.min(r, w / 2, h / 2);
@@ -4469,13 +4688,15 @@ const App = {
     if (!canvas) return;
 
     const entries = Object.entries(d.modelCounts || {})
-      .map(([name, s]) => ({ name, count: s.requests || 0 }))
+      .map(([name, s]) => ({ name, count: s.requests || 0, success: s.success || 0, errors: s.errors || 0 }))
       .filter(e => e.count > 0)
       .sort((a, b) => b.count - a.count);
 
     const top = entries.slice(0, 8);
-    const others = entries.slice(8).reduce((a, b) => a + b.count, 0);
-    if (others > 0) top.push({ name: 'others', count: others });
+    const others = entries.slice(8).reduce((acc, e) => ({
+      count: acc.count + e.count, success: acc.success + e.success, errors: acc.errors + e.errors,
+    }), { count: 0, success: 0, errors: 0 });
+    if (others.count > 0) top.push({ name: 'others', count: others.count, success: others.success, errors: others.errors });
 
     const total = top.reduce((a, b) => a + b.count, 0);
 
@@ -4489,6 +4710,7 @@ const App = {
       ctx.textBaseline = 'middle';
       ctx.fillText(I18n.t('table.empty.noData'), W / 2, H / 2);
       if (legend) legend.innerHTML = '';
+      this._pieHitMap = null;
       return;
     }
 
@@ -4496,6 +4718,7 @@ const App = {
     const rOuter = Math.min(W, H) / 2 - 6;
     const rInner = rOuter * 0.58;
 
+    const segments = [];
     let angle = -Math.PI / 2;
     top.forEach((seg, i) => {
       const frac = seg.count / total;
@@ -4507,8 +4730,12 @@ const App = {
       ctx.closePath();
       ctx.fillStyle = this._pieColors[i % this._pieColors.length];
       ctx.fill();
+      segments.push({ ...seg, color: this._pieColors[i % this._pieColors.length], startAngle: angle, endAngle: a2 });
       angle = a2;
     });
+
+    this._pieHitMap = { cx, cy, rOuter, rInner, total, segments, W, H };
+    this._bindPieHover();
 
     // Center label
     ctx.fillStyle = 'var(--text)';
@@ -4595,23 +4822,28 @@ const App = {
         communicationWithTools: I18n.t('experimental.communicationWithTools'),
         communicationNoTools: I18n.t('experimental.communicationNoTools')
       };
-      spHolder.innerHTML = Object.entries(sp.prompts || {}).map(([key, text]) => `
+      spHolder.innerHTML = Object.entries(sp.prompts || {}).map(([key, text]) => {
+        const safeKey = this.esc(key);
+        const keyArg = this.escJsAttr(key);
+        const promptId = this.systemPromptDomId(key);
+        return `
         <div style="border:1px solid var(--border);border-radius:var(--radius);padding:12px;background:var(--surface)">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-            <div><code style="color:var(--accent);font-weight:600">${key}</code> <span class="text-sm text-muted">${labels[key]||key}</span></div>
+            <div><code style="color:var(--accent);font-weight:600">${safeKey}</code> <span class="text-sm text-muted">${this.esc(labels[key] || key)}</span></div>
             <div class="btn-group">
-              <button class="btn btn-ghost btn-xs" onclick="App.resetSystemPrompt('${key}')">${I18n.t('experimental.default')}</button>
-              <button class="btn btn-primary btn-xs" onclick="App.saveSystemPrompt('${key}')">${I18n.t('experimental.save')}</button>
+              <button class="btn btn-ghost btn-xs" onclick="App.resetSystemPrompt('${keyArg}')">${I18n.t('experimental.default')}</button>
+              <button class="btn btn-primary btn-xs" onclick="App.saveSystemPrompt('${keyArg}')">${I18n.t('experimental.save')}</button>
             </div>
           </div>
-          <textarea id="sp-${key}" class="input" rows="3" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical;line-height:1.5">${this.esc(text)}</textarea>
+          <textarea id="${promptId}" class="input" rows="3" style="width:100%;font-family:var(--mono);font-size:12px;resize:vertical;line-height:1.5">${this.esc(text)}</textarea>
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
   },
 
   async saveSystemPrompt(key) {
-    const ta = document.getElementById(`sp-${key}`);
+    const ta = document.getElementById(this.systemPromptDomId(key));
     if (!ta) return;
     await this.api('PUT', '/system-prompts', { [key]: ta.value.trim() });
     this.toast(`${key} ${I18n.t('toast.saved')}`, 'success');
@@ -4620,7 +4852,7 @@ const App = {
   async resetSystemPrompt(key) {
     const ok = await this.confirm(I18n.t('action.reset'), `${key} ${I18n.t('confirm.restoreDefaultDesc') || 'restore to default?'}`, { okText: I18n.t('action.reset') });
     if (!ok) return;
-    await this.api('DELETE', `/system-prompts/${key}`);
+    await this.api('DELETE', `/system-prompts/${encodeURIComponent(key)}`);
     this.toast(`${key} ${I18n.t('experimental.restored') || 'reset'}`, 'success');
     this.loadExperimental();
   },
@@ -4731,6 +4963,15 @@ const App = {
     if (d > 0) return `${d}${I18n.t('time.day')} ${h}${I18n.t('time.hour')} ${m}${I18n.t('time.minute')}`;
     if (h > 0) return `${h}${I18n.t('time.hour')} ${m}${I18n.t('time.minute')}`;
     return `${m}${I18n.t('time.minute')} ${s}${I18n.t('time.second')}`;
+  },
+  async revealAndCopyKey(accountId) {
+    try {
+      const r = await this.api('POST', `/account/${encodeURIComponent(accountId)}/reveal-key`);
+      if (r?.apiKey) this.copyKey(r.apiKey);
+      else this.toast(I18n.t('toast.copyFailed'), 'error');
+    } catch (e) {
+      this.toast(e?.message || I18n.t('toast.copyFailed'), 'error');
+    }
   },
   copyKey(key) {
     const fallback = () => {
@@ -4849,6 +5090,9 @@ const App = {
     }).join('')}</div>`;
   },
   esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); },
+  systemPromptDomId(key) {
+    return `sp-${encodeURIComponent(String(key == null ? '' : key)).replace(/%/g, '_')}`;
+  },
   // For values interpolated into an inline `onclick="App.f('${...}')"`
   // string: the HTML attribute parser will decode &#39; back to ', which
   // then breaks out of the JS string literal. Do JS-level string escaping

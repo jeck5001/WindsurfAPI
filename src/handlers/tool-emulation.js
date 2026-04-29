@@ -198,6 +198,160 @@ export function buildToolPreambleForProto(tools, toolChoice, environment) {
 }
 
 /**
+ * Strip schema fields that are documentation-only. Local `$ref`s are inlined
+ * before stripping so schema-compact preambles remain self-contained.
+ */
+function resolveLocalSchemaRef(ref, root) {
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) return null;
+  const parts = ref.slice(2).split('/').map(p => p.replace(/~1/g, '/').replace(/~0/g, '~'));
+  let cur = root;
+  for (const part of parts) {
+    if (!cur || typeof cur !== 'object' || !(part in cur)) return null;
+    cur = cur[part];
+  }
+  return cur && typeof cur === 'object' ? cur : null;
+}
+
+function stripSchemaDocs(schema, root = schema, refStack = []) {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(s => stripSchemaDocs(s, root, refStack));
+  if (typeof schema.$ref === 'string') {
+    const ref = schema.$ref;
+    // On cycles, replace the recursive edge with a generic object placeholder.
+    // Leaving `{$ref: ...}` in the output would dangle because we strip $defs
+    // below, and the model would have nothing to resolve the pointer against.
+    if (refStack.includes(ref)) return { type: 'object' };
+    const resolved = resolveLocalSchemaRef(ref, root);
+    if (!resolved) return { type: 'object' };
+    const siblings = Object.fromEntries(Object.entries(schema).filter(([k]) => k !== '$ref'));
+    return stripSchemaDocs({ ...resolved, ...siblings }, root, [...refStack, ref]);
+  }
+  const KEEP = new Set(['type', 'enum', 'properties', 'items', 'required', 'oneOf', 'anyOf', 'allOf', 'const', 'format', 'additionalProperties']);
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (!KEEP.has(k)) continue;
+    if (k === 'properties' && v && typeof v === 'object') {
+      const props = {};
+      for (const [pk, pv] of Object.entries(v)) props[pk] = stripSchemaDocs(pv, root, refStack);
+      out[k] = props;
+    } else if ((k === 'items' || k === 'oneOf' || k === 'anyOf' || k === 'allOf') && v) {
+      out[k] = stripSchemaDocs(v, root, refStack);
+    } else if (k === 'additionalProperties') {
+      if (v === false) out[k] = false;
+      else if (v && typeof v === 'object') out[k] = stripSchemaDocs(v, root, refStack);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function firstSentence(text) {
+  if (typeof text !== 'string' || !text) return '';
+  const trimmed = text.trim().split(/\n\s*\n/)[0].replace(/\s+/g, ' ').trim();
+  const m = trimmed.match(/^.{1,160}?[.!?](?=\s|$)/);
+  return (m ? m[0] : trimmed.slice(0, 160)).trim();
+}
+
+function paramSignature(parameters) {
+  if (!parameters || typeof parameters !== 'object' || !parameters.properties) return '';
+  const required = new Set(Array.isArray(parameters.required) ? parameters.required : []);
+  const parts = [];
+  for (const [name, schema] of Object.entries(parameters.properties)) {
+    const optional = required.has(name) ? '' : '?';
+    let type = schema?.type || 'any';
+    if (Array.isArray(type)) type = type.join('|');
+    if (Array.isArray(schema?.enum) && schema.enum.length <= 6) {
+      type = schema.enum.map(v => JSON.stringify(v)).join('|');
+    }
+    parts.push(`${name}${optional}: ${type}`);
+  }
+  return parts.join(', ');
+}
+
+/**
+ * Schema-compact preamble: same shape as full, but strips schema docs and
+ * minifies JSON. Saves ~40-60% with no loss of tool-call correctness.
+ */
+export function buildSchemaCompactToolPreambleForProto(tools, toolChoice, environment) {
+  if (!Array.isArray(tools) || tools.length === 0) return '';
+  const { mode, forceName } = resolveToolChoice(toolChoice);
+  const lines = [];
+  if (environment && typeof environment === 'string' && environment.trim()) {
+    lines.push('## Environment facts');
+    lines.push('The facts below are provided by the calling agent and describe the active execution context. Tool calls operate on these paths.');
+    lines.push('');
+    lines.push(environment.trim());
+    lines.push('');
+  }
+  lines.push(TOOL_PROTOCOL_SYSTEM_HEADER);
+  lines.push(TOOL_CHOICE_SUFFIX[mode] || TOOL_CHOICE_SUFFIX.auto);
+  if (forceName) {
+    lines.push(`7. You MUST call the function "${forceName}". No other function and no direct answer.`);
+  }
+  const specificRules = toolSpecificRules(tools);
+  if (specificRules.length) {
+    lines.push('');
+    lines.push('Tool argument fidelity rules:');
+    lines.push(...specificRules);
+  }
+  lines.push('');
+  lines.push('Available functions:');
+  for (const t of tools) {
+    if (t?.type !== 'function' || !t.function) continue;
+    const { name, description, parameters } = t.function;
+    lines.push('');
+    lines.push(`### ${name}`);
+    if (description) lines.push(firstSentence(description));
+    if (parameters) {
+      lines.push(`Params: ${JSON.stringify(stripSchemaDocs(parameters))}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Skinny preamble: name + one-line description + parameter signature
+ * (`file_path: string, encoding?: string`). Drops full JSON schema. Last
+ * stop before names-only — keeps enough for the model to know which
+ * params each tool needs without paying the schema serialization cost.
+ */
+export function buildSkinnyToolPreambleForProto(tools, toolChoice, environment) {
+  if (!Array.isArray(tools) || tools.length === 0) return '';
+  const { mode, forceName } = resolveToolChoice(toolChoice);
+  const lines = [];
+  if (environment && typeof environment === 'string' && environment.trim()) {
+    lines.push('## Environment facts');
+    lines.push(environment.trim());
+    lines.push('');
+  }
+  lines.push(TOOL_PROTOCOL_SYSTEM_HEADER);
+  lines.push(TOOL_CHOICE_SUFFIX[mode] || TOOL_CHOICE_SUFFIX.auto);
+  if (forceName) {
+    lines.push(`7. You MUST call the function "${forceName}". No other function and no direct answer.`);
+  }
+  const specificRules = toolSpecificRules(tools);
+  if (specificRules.length) {
+    lines.push('');
+    lines.push('Tool argument fidelity rules:');
+    lines.push(...specificRules);
+  }
+  lines.push('');
+  lines.push('Available functions (signature shown; full JSON schemas omitted to fit upstream payload budget):');
+  for (const t of tools) {
+    if (t?.type !== 'function' || !t.function?.name) continue;
+    const { name, description, parameters } = t.function;
+    const sig = paramSignature(parameters);
+    const desc = description ? firstSentence(description) : '';
+    if (sig && desc) lines.push(`- ${name}(${sig}) — ${desc}`);
+    else if (sig) lines.push(`- ${name}(${sig})`);
+    else if (desc) lines.push(`- ${name}() — ${desc}`);
+    else lines.push(`- ${name}()`);
+  }
+  return lines.join('\n');
+}
+
+/**
  * Compact, names-only proto preamble. Same protocol header + environment
  * block as `buildToolPreambleForProto`, but lists tools by name only and
  * drops every parameter schema. Used as a payload-budget fallback when a
@@ -384,15 +538,18 @@ export function normalizeMessagesForCascade(messages, tools, options = {}) {
  * next delta.
  */
 const TOOL_PARSE_MODE = process.env.TOOL_PARSE_MODE || 'auto';
+const TOOL_XML_BODY_MAX = 65_536;
 
 export class ToolCallStreamParser {
-  constructor() {
+  constructor(options = {}) {
     this.buffer = '';
     this.inToolCall = false;
     this.inToolResult = false;
     this.inToolCode = false;
     this.inBareCall = false;
     this._totalSeen = 0;
+    this.parseToolCode = options.parseToolCode !== false;
+    this.parseBareJson = options.parseBareJson !== false;
   }
 
   _findClosingBrace() {
@@ -489,6 +646,12 @@ export class ToolCallStreamParser {
     while (true) {
       // ── Inside a <tool_result …>…</tool_result> block — discard body ──
       if (this.inToolResult) {
+        if (this.buffer.length > TOOL_XML_BODY_MAX) {
+          log.warn(`ToolCallStreamParser: <tool_result> body exceeds 65KB (${this.buffer.length} bytes), dropping`);
+          this.buffer = '';
+          this.inToolResult = false;
+          continue;
+        }
         const closeIdx = this.buffer.indexOf(TR_CLOSE);
         if (closeIdx === -1) break;
         this.buffer = this.buffer.slice(closeIdx + TR_CLOSE.length);
@@ -498,6 +661,13 @@ export class ToolCallStreamParser {
 
       // ── Inside a <tool_call>…</tool_call> block — parse JSON body ──
       if (this.inToolCall) {
+        if (this.buffer.length > TOOL_XML_BODY_MAX) {
+          log.warn(`ToolCallStreamParser: <tool_call> body exceeds 65KB (${this.buffer.length} bytes), emitting as text`);
+          pushText(`${TC_OPEN}${this.buffer}`);
+          this.buffer = '';
+          this.inToolCall = false;
+          continue;
+        }
         const closeIdx = this.buffer.indexOf(TC_CLOSE);
         if (closeIdx === -1) break;
         const body = this.buffer.slice(0, closeIdx).trim();
@@ -538,8 +708,8 @@ export class ToolCallStreamParser {
       const mode = TOOL_PARSE_MODE;
       const tcIdx = (mode === 'auto' || mode === 'xml') ? this.buffer.indexOf(TC_OPEN) : -1;
       const trIdx = this.buffer.indexOf(TR_PREFIX);
-      const tcCodeIdx = (mode === 'auto' || mode === 'tool_code') ? this.buffer.indexOf(TC_CODE) : -1;
-      const tcBareIdx = (mode === 'auto' || mode === 'json') ? this.buffer.indexOf(TC_BARE) : -1;
+      const tcCodeIdx = this.parseToolCode && (mode === 'auto' || mode === 'tool_code') ? this.buffer.indexOf(TC_CODE) : -1;
+      const tcBareIdx = this.parseBareJson && (mode === 'auto' || mode === 'json') ? this.buffer.indexOf(TC_BARE) : -1;
 
       let nextIdx = -1;
       let tagType = null;
@@ -556,7 +726,10 @@ export class ToolCallStreamParser {
 
       if (nextIdx === -1) {
         let holdLen = 0;
-        for (const prefix of [TC_OPEN, TR_PREFIX, TC_CODE, TC_BARE]) {
+        const holdPrefixes = [TC_OPEN, TR_PREFIX];
+        if (this.parseToolCode) holdPrefixes.push(TC_CODE);
+        if (this.parseBareJson) holdPrefixes.push(TC_BARE);
+        for (const prefix of holdPrefixes) {
           const maxHold = Math.min(prefix.length - 1, this.buffer.length);
           for (let len = maxHold; len > 0; len--) {
             if (this.buffer.endsWith(prefix.slice(0, len))) {
@@ -662,4 +835,11 @@ export function parseToolCallsFromText(text) {
     text: a.text + b.text,
     toolCalls: [...a.toolCalls, ...b.toolCalls],
   };
+}
+
+export function stripToolMarkupFromText(text) {
+  const parser = new ToolCallStreamParser({ parseToolCode: false, parseBareJson: false });
+  const a = parser.feed(text);
+  const b = parser.flush();
+  return a.text + b.text;
 }
