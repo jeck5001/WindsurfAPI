@@ -187,6 +187,18 @@ export async function runDockerSelfUpdate() {
     return { ok: false, reason: 'pull-failed', detail: e.message };
   }
 
+  // Also ensure the deployer sidecar image is local. First-time users on
+  // a host that has never pulled `docker:24-cli` will otherwise hit
+  //   POST /containers/create -> 404: No such image: docker:24-cli
+  // (reported as the dashboard "一键更新并重启" failure path). Pull it
+  // explicitly. It's tiny (~30 MB) and only runs the one-shot
+  // `docker compose up -d`, so this is a one-time cost per host.
+  try {
+    await dockerPull(DEPLOYER_IMAGE);
+  } catch (e) {
+    return { ok: false, reason: 'deployer-pull-failed', detail: e.message };
+  }
+
   // Spawn the deployer sidecar. We mount docker.sock and the host
   // project dir (so `docker compose -p ... --project-directory ...`
   // can find the compose file). AutoRemove cleans up the sidecar after

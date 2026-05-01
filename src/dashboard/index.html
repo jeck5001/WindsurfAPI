@@ -2251,10 +2251,19 @@ const I18n = {
     }
     // Fallback to key if not found
     if (typeof val !== 'string') {
-      // Try embedded default (for zh-CN, use text from HTML)
-      if (code === 'zh-CN') {
-        const el = document.querySelector(`[data-i18n="${key}"]`);
-        if (el?.dataset.i18nOrig) return el.dataset.i18nOrig;
+      // Try embedded default (for zh-CN, use text from HTML).
+      // The DOM lookup is only meaningful when the key is a real dotted
+      // i18n identifier (alnum + dot + underscore). A backend error
+      // message accidentally passed as a key — e.g. `error.docker API
+      // POST /containers/create -> 404: {"message":"..."}` — would blow
+      // up `querySelector` because `"` and `{` are CSS-selector syntax.
+      // Guard with CSS.escape AND a sanity charset check so we never
+      // throw out of the i18n resolver.
+      if (code === 'zh-CN' && /^[A-Za-z0-9_.-]+$/.test(key)) {
+        try {
+          const el = document.querySelector(`[data-i18n="${CSS.escape(key)}"]`);
+          if (el?.dataset.i18nOrig) return el.dataset.i18nOrig;
+        } catch { /* selector still rejected — give up and return the key */ }
       }
       return key;
     }
@@ -2685,7 +2694,16 @@ const App = {
       }
       if (r.mode === 'docker') {
         if (!r.ok) {
-          throw new Error(this.translateError(r.detail || r.reason, 'error.updateFailed'));
+          // r.reason is the short stable code ("deployer-pull-failed",
+          // "deployer-create-failed", etc.) and the only thing we can
+          // map to a localized i18n key. r.detail is the raw upstream
+          // error string — long, unstable, often containing characters
+          // that explode CSS selectors if treated as an i18n key. Show
+          // reason as the localized message; show detail underneath
+          // for debugging.
+          const localized = this.translateError(r.reason, 'error.updateFailed');
+          const msg = r.detail ? `${localized} — ${r.detail}` : localized;
+          throw new Error(msg);
         }
         const delaySec = r.delaySeconds || 8;
         status.innerHTML = `

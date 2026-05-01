@@ -107,3 +107,72 @@ describe('docker self-update wired into /self-update', () => {
       'POST /self-update must call runDockerSelfUpdate when docker mode is available');
   });
 });
+
+// User report (2026-05-01): one-click 「更新并重启」on a host that has
+// never pulled `docker:24-cli` failed with the dashboard surfacing
+//   ✗ Failed to execute 'querySelector' on 'Document': '[data-i18n=
+//     "error.docker API POST /containers/create -> 404: {"message":
+//     "No such image: docker:24-cli"} "]' is not a valid selector.
+//
+// Three compounding bugs:
+//
+//   1. runDockerSelfUpdate only pulled ctx.image (the windsurf-api
+//      image) — never pulled DEPLOYER_IMAGE. Fresh hosts hit
+//      `/containers/create -> 404 No such image: docker:24-cli`.
+//
+//   2. The dashboard's applyUpdate() picked `r.detail || r.reason`
+//      when constructing the user message, so the long raw error
+//      string ("docker API POST /containers/create -> 404: ...") won
+//      over the short stable code ("deployer-create-failed"). The long
+//      string then went into translateError -> I18n.t -> querySelector
+//      and exploded.
+//
+//   3. I18n.t's zh-CN fallback path did `document.querySelector(
+//      '[data-i18n="${key}"]')` with no escaping, so any key containing
+//      `"` / `{` / `:` threw DOMException and broke the resolver.
+describe('docker self-update: deployer image pulled (#user 2026-05-01)', () => {
+  test('runDockerSelfUpdate pulls DEPLOYER_IMAGE before creating the container', () => {
+    // Pin the call ordering — pull(ctx.image) must come first (the new
+    // app), then pull(DEPLOYER_IMAGE) (the sidecar runtime), then the
+    // POST /containers/create. A future refactor that drops the second
+    // pull will resurrect the 404 No-such-image symptom.
+    const m = MOD.match(/dockerPull\(ctx\.image\)[\s\S]{0,1500}?dockerPull\(DEPLOYER_IMAGE\)[\s\S]{0,1500}?\/containers\/create/);
+    assert.ok(m,
+      'must pull ctx.image, then pull DEPLOYER_IMAGE, then POST /containers/create — in that order');
+  });
+
+  test('deployer-pull-failed reason is reported when the sidecar pull fails', () => {
+    assert.match(MOD, /reason: 'deployer-pull-failed'/,
+      'a distinct reason code is needed so the frontend can localize it');
+  });
+});
+
+describe('dashboard: applyUpdate prefers reason over detail (#user 2026-05-01)', () => {
+  test('docker-mode error path uses r.reason (short code), not r.detail (free text)', () => {
+    const html = readFileSync(join(__dirname, '..', 'src/dashboard/index.html'), 'utf8');
+    // The two MUST be in this order: the localized message (from
+    // r.reason) is the i18n payload; r.detail goes to the suffix only
+    // for debugging visibility. Reversing them lets long unstable
+    // strings flow into I18n.t and re-trigger the querySelector crash.
+    const m = html.match(/translateError\(r\.reason,\s*'error\.updateFailed'\)[\s\S]{0,400}?r\.detail/);
+    assert.ok(m,
+      'docker-mode error handling must call translateError with r.reason FIRST and only append r.detail as plain suffix');
+  });
+});
+
+describe('I18n.t: zh-CN DOM fallback hardened against arbitrary keys (#user 2026-05-01)', () => {
+  test('querySelector lookup is guarded by a charset check + try/catch', () => {
+    const html = readFileSync(join(__dirname, '..', 'src/dashboard/index.html'), 'utf8');
+    // The fallback path must only run on keys that look like real
+    // dotted i18n identifiers; CSS.escape AND a try/catch keep us safe
+    // even if a future caller still passes garbage.
+    assert.match(html, /\/\^\[A-Za-z0-9_\.\-\]\+\$\/\.test\(key\)/,
+      'must charset-validate the key before constructing a CSS selector');
+    assert.match(html, /CSS\.escape\(key\)/,
+      'must CSS.escape the key when building the [data-i18n] selector');
+    // The whole try/catch wraps the document.querySelector call.
+    const m = html.match(/try\s*\{[\s\S]{0,500}?document\.querySelector\(`\[data-i18n="\$\{CSS\.escape\(key\)\}"\]`\)[\s\S]{0,200}?\}\s*catch/);
+    assert.ok(m,
+      'querySelector call must sit inside try/catch so a malformed key cannot throw out of the i18n resolver');
+  });
+});
