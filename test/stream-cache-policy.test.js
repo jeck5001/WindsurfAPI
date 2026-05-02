@@ -99,7 +99,10 @@ test('nonStreamResponse accepts cachePolicy parameter (#82, #83)', () => {
   // a scope where body was undefined.
   assert.match(
     src,
-    /await nonStreamResponse\([\s\S]+?wantJson,\s*cachePolicy(?:,\s*[A-Za-z_$][\w$]*)*,?\s*\)/,
+    // Allow extra positional args (cachePolicy, wantThinking, tools, route ...)
+    // each of which can be a bare identifier or simple expression like
+    // `body.__route || 'chat'`.
+    /await nonStreamResponse\([\s\S]+?wantJson,\s*cachePolicy(?:,\s*[^,)]+)*,?\s*\)/,
     'handleChatCompletions must pass cachePolicy when invoking nonStreamResponse',
   );
 });

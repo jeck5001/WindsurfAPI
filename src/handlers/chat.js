@@ -1598,7 +1598,7 @@ export async function handleChatCompletions(body, context = {}) {
       useCascade, acct.apiKey, ckey,
       reuseEnabled ? { reuseEntry, lsPort: ls.port, apiKey: acct.apiKey, callerKey, cachePolicy, fpOpts } : null,
       modelInfo?.provider || null,
-      emulateTools, toolPreamble, wantJson, cachePolicy, wantThinking, tools,
+      emulateTools, toolPreamble, wantJson, cachePolicy, wantThinking, tools, body.__route || 'chat',
     );
     if (result.status === 200) return result;
     reuseEntry = null; // don't try to reuse on the retry
@@ -1712,7 +1712,7 @@ export async function handleChatCompletions(body, context = {}) {
   return lastErr || { status: 503, body: { error: { message: 'No active accounts available', type: 'pool_exhausted' } } };
 }
 
-async function nonStreamResponse(client, id, created, model, modelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, apiKey, ckey, poolCtx, provider, emulateTools, toolPreamble, wantJson = false, cachePolicy = null, wantThinking = false, tools = []) {
+async function nonStreamResponse(client, id, created, model, modelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, apiKey, ckey, poolCtx, provider, emulateTools, toolPreamble, wantJson = false, cachePolicy = null, wantThinking = false, tools = [], route = 'chat') {
   const startTime = Date.now();
   try {
     let allText = '';
@@ -1747,7 +1747,7 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
           provider,
           // v2.0.62 (#115) — route lets the parser pick the gpt_native
           // dialect when responses.js routed here for a GPT-family model.
-          route: body.__route || 'chat',
+          route,
         });
         allText = parsed.text;
         // v2.0.55 audit M2: drop tool_calls whose name isn't in the
