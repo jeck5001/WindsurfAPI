@@ -213,7 +213,15 @@ async function route(req, res) {
   // ─── API endpoints (require API key) ────────────────────
 
   if (!validateApiKey(extractToken(req))) {
-    return json(res, 401, { error: { message: 'Invalid API key', type: 'auth_error' } });
+    // v2.0.61 (#110): clearer error so operators know the issue is
+    // configuration (no API_KEY set on a public-bind instance) rather
+    // than a bad client header. The chat client side rarely shows a
+    // verbose error so we cram the diagnosis into the message itself.
+    const tokenSent = !!extractToken(req);
+    const message = tokenSent
+      ? 'Invalid API key. Either the key is wrong, or the server has API_KEY configured to a different value than the one your client sent.'
+      : 'Missing API key. This server runs in fail-closed mode: requests must include `Authorization: Bearer <key>` (or `x-api-key: <key>`) matching the configured API_KEY env var. If you intend to run open (no auth), bind the server to localhost (HOST=127.0.0.1).';
+    return json(res, 401, { error: { message, type: 'auth_error' } });
   }
 
   // ─── Auth management (admin — gated by API key above) ──

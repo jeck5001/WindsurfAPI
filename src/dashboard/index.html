@@ -2516,6 +2516,38 @@ const App = {
     await I18n.init();
     this.lang = I18n.locale === 'zh-CN' ? 'zh' : 'en';
     const auth = await this.api('GET', '/auth');
+    // v2.0.61 (#110): when DASHBOARD_PASSWORD isn't configured AND we're
+    // bound to a public host, the backend returns `locked:true`. Show a
+    // dedicated message instead of a useless password prompt the user
+    // can't possibly satisfy. Without this hint operators land here from
+    // a fresh `docker compose up` and think the dashboard is broken.
+    if (auth.locked) {
+      const overlay = document.getElementById('login-overlay');
+      const pwEl = document.getElementById('login-password');
+      const btnEl = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+      overlay.classList.remove('hidden');
+      if (pwEl) pwEl.style.display = 'none';
+      if (btnEl) btnEl.style.display = 'none';
+      if (errEl) {
+        errEl.style.color = 'var(--text-muted)';
+        errEl.style.fontSize = '13px';
+        errEl.style.lineHeight = '1.65';
+        errEl.style.textAlign = 'left';
+        errEl.innerHTML = `
+          <strong style="color:var(--warn);display:block;margin-bottom:8px">${I18n.t('login.lockedTitle') || 'Dashboard locked'}</strong>
+          <div>${I18n.t('login.lockedDesc') || 'Server bound to public host without DASHBOARD_PASSWORD. v2.0.55 fail-closed: API_KEY no longer doubles as the dashboard password.'}</div>
+          <div style="margin-top:10px">${I18n.t('login.lockedFix') || 'Fix:'}</div>
+          <pre style="background:var(--surface-2);padding:10px;border-radius:6px;font-size:12px;margin-top:6px;white-space:pre-wrap"># .env
+DASHBOARD_PASSWORD=YOUR_STRONG_PASSWORD
+
+# restart container
+docker compose up -d --force-recreate</pre>
+          <div style="margin-top:8px;font-size:12px">${I18n.t('login.lockedDocs') || 'See'} <a href="https://github.com/dwgx/WindsurfAPI/blob/master/docs/releases/RELEASE_NOTES_2.0.55.md" target="_blank" style="color:var(--accent)">v2.0.55 release notes</a>.</div>
+        `;
+      }
+      return;
+    }
     if (auth.required && !auth.valid) {
       document.getElementById('login-overlay').classList.remove('hidden');
       return;

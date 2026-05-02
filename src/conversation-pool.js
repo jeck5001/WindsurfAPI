@@ -90,6 +90,39 @@ function stripMetaTags(s) {
   return stripped;
 }
 
+// v2.0.61 (#111) — normalize dynamic chunks of the system prompt that
+// drift across turns (today's date, ISO timestamps, working directory,
+// session UUIDs) so the same logical Claude Code session keeps the
+// same cascade fingerprint instead of cache-missing every turn.
+//
+// Without this, Claude Code's 26KB system prompt (which embeds the
+// current date / cwd / session id) hashed differently every request,
+// reuse silently fell back to fresh, and the model looked like it was
+// "looping" because each call started a new cascade.
+//
+// Patterns are conservative — only normalize tokens that are
+// (a) verifiably temporal/identifier-shaped and (b) common enough in
+// real Claude Code system prompts that their presence dominated the
+// hash. Plain prose drift remains in the hash so genuine prompt edits
+// still create a fresh cascade.
+function normalizeSystemPromptForHash(s) {
+  return String(s || '')
+    // ISO 8601 timestamps (with or without ms / tz)
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<ts>')
+    // "Today's date is YYYY-MM-DD" / "Today is YYYY-MM-DD" / etc.
+    .replace(/\b(Today(?:'s)?\s+(?:date|is)(?:\s+is)?\s*[:\-]?\s*)\d{4}-\d{2}-\d{2}/gi, '$1<date>')
+    // Bare YYYY-MM-DD lines (date-only) when standalone
+    .replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d|T)/g, '<date>')
+    // UUIDs (8-4-4-4-12 hex) — session/account ids, always
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    // Working directory lines (Claude Code prepends each turn)
+    .replace(/^[ \t]*[-•]?\s*(?:Working\s+directory|Current\s+working\s+directory|cwd|CWD)\s*[:：][^\n]*/gim, '$&'.replace(/[^:：]+$/, ' <cwd>'))
+    // "Current time:" / "Time:" lines
+    .replace(/^[ \t]*[-•]?\s*(?:Current\s+(?:date|time)|Time)\s*[:：][^\n]*/gim, '$&'.replace(/[^:：]+$/, ' <time>'))
+    // Session ID lines (Claude Code 2.x emits these)
+    .replace(/^[ \t]*[-•]?\s*(?:Session\s*ID|sessionId|session_id)\s*[:：][^\n]*/gim, '<sessionid>');
+}
+
 // Stable JSON: recursively sort object keys so {b:1,a:2} and {a:2,b:1}
 // produce the same string. Without this, two equivalent inputs hash
 // differently when client serialization order varies.
@@ -233,19 +266,37 @@ function systemDigest(messages) {
   if (process.env.CASCADE_REUSE_HASH_SYSTEM === '0') return '';
   const sys = messages.filter(m => m?.role === 'system');
   if (!sys.length) return '';
-  return shortDigest(stableStringify(sys.map(projectMessage)), 32);
+  // v2.0.61 (#111) — apply normalizeSystemPromptForHash to each text
+  // block so dynamic chunks (today's date / cwd / session id / ISO ts /
+  // UUIDs) don't drift the system fingerprint each turn.
+  const normalized = sys.map(m => {
+    const projected = projectMessage(m);
+    if (Array.isArray(projected.content)) {
+      projected.content = projected.content.map(b => {
+        if (b?.type === 'text' && typeof b.text === 'string') {
+          return { ...b, text: normalizeSystemPromptForHash(b.text) };
+        }
+        return b;
+      });
+    }
+    return projected;
+  });
+  return shortDigest(stableStringify(normalized), 32);
 }
 
 function toolContextDigest(opts = {}) {
   if (!opts.emulateTools) return '';
-  const tools = Array.isArray(opts.tools) ? opts.tools.map(t => {
+  // v2.0.61 (#111) — sort tools by name before hashing so client-side
+  // ordering changes (Claude Code 2.x occasionally reshuffles its 70+
+  // tool list across turns) don't drift the tool fingerprint.
+  const tools = (Array.isArray(opts.tools) ? opts.tools.map(t => {
     const fn = t?.function || t;
     return {
       name: fn?.name || '',
       description: fn?.description || '',
       parameters: fn?.parameters ?? fn?.input_schema ?? null,
     };
-  }) : [];
+  }) : []).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   return shortDigest(stableStringify({
     tools,
     tool_choice: opts.toolChoice ?? null,

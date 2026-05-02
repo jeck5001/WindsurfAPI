@@ -1607,6 +1607,10 @@ export async function handleChatCompletions(body, context = {}) {
     }
     lastErr = result;
     const errType = result.body?.error?.type;
+    // v2.0.61 (#113): policy_blocked → don't rotate accounts, return
+    // immediately. The model refused the request, swapping accounts
+    // gives the same refusal but burns more quota.
+    if (errType === 'policy_blocked') return result;
     // Rate limit: this account is done for this model, try the next one
     if (errType === 'rate_limit_exceeded') {
       if (!reuseEntryDead && strictReuse && checkedOutReuseEntry && fpBefore && checkedOutReuseEntry.apiKey === acct.apiKey) {
@@ -1876,10 +1880,18 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     const isInternal = /internal error occurred.*error id/i.test(err.message);
     const isTransport = isCascadeTransportError(err);
     const isTransient = isUpstreamTransientError(err, isInternal);
+    // v2.0.61 (#113): Anthropic / OpenAI content-policy / verification
+    // challenges are NOT transient — rotating accounts won't help and
+    // wastes quota. Detect and short-circuit with a clean 451 + clear
+    // error so clients stop the retry loop. Patterns are conservative:
+    // we only catch unambiguous policy markers, not generic "content
+    // moderation" warnings (which can be retried on a different model).
+    const isPolicyBlocked = /cyber\s*verification|content[\s_-]+policy|policy[\s_-]+(?:violation|blocked|denied)|safety[\s_-]+(?:policy|blocked)|prompt[\s_-]+(?:rejected|blocked)\s+by[\s_-]+policy|usage[\s_-]+policy[\s_-]+violation/i.test(err.message);
     if (isAuthFail) reportError(apiKey);
     if (isRateLimit) { markRateLimited(apiKey, rateLimitCooldownMs(err.message), modelKey); err.isRateLimit = true; err.isModelError = true; err.kind ||= 'model_error'; }
     if (isInternal) { reportInternalError(apiKey); err.isModelError = true; err.kind ||= 'transient_stall'; }
     if (isTransport) { err.isModelError = true; err.kind ||= 'transient_stall'; }
+    if (isPolicyBlocked) { err.isPolicyBlocked = true; err.isModelError = true; err.kind = 'policy_blocked'; }
     // v2.0.56: ban-shaped error → reportBanSignal handles the 2-strike
     // promotion to status='banned'. Skip when also a rate-limit so we
     // don't conflate "out of quota" with "account dead".
@@ -1892,6 +1904,20 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     }
     recordRequest(model, false, Date.now() - startTime, apiKey);
     log.error('Chat error:', err.message);
+    // v2.0.61 — policy block surfaces as 451 Unavailable For Legal Reasons,
+    // which is exactly the semantic clients need (the model refuses the
+    // request itself, no retry will help).
+    if (isPolicyBlocked) {
+      return {
+        status: 451,
+        body: {
+          error: {
+            message: `请求被上游 policy 拦截 (${model})。这不是账号问题 — 切账号也救不回来；请改 prompt 或换模型再试。原始上游消息：${err.message.slice(0, 200)}`,
+            type: 'policy_blocked',
+          },
+        },
+      };
+    }
     // Rate limits → 429 with Retry-After; model errors → 403; others → 502
     if (isRateLimit) {
       const rl = isAllRateLimited(modelKey);
@@ -2433,9 +2459,12 @@ function streamResponse(id, created, model, modelKey, provider, messages, cascad
             const isInternal = /internal error occurred.*error id/i.test(err.message);
             const isTransport = isCascadeTransportError(err);
             const isTransient = isUpstreamTransientError(err, isInternal);
+            // v2.0.61 (#113) — same policy detection as nonStreamResponse.
+            const isPolicyBlocked = /cyber\s*verification|content[\s_-]+policy|policy[\s_-]+(?:violation|blocked|denied)|safety[\s_-]+(?:policy|blocked)|prompt[\s_-]+(?:rejected|blocked)\s+by[\s_-]+policy|usage[\s_-]+policy[\s_-]+violation/i.test(err.message);
             if (isAuthFail) reportError(currentApiKey);
             if (isRateLimit) { markRateLimited(currentApiKey, rateLimitCooldownMs(err.message), modelKey); err.isRateLimit = true; err.isModelError = true; err.kind ||= 'model_error'; }
             if (isInternal) { reportInternalError(currentApiKey); err.isModelError = true; err.kind ||= 'transient_stall'; }
+            if (isPolicyBlocked) { err.isPolicyBlocked = true; err.isModelError = true; err.kind = 'policy_blocked'; }
             if (isTransport) { err.isModelError = true; err.kind ||= 'transient_stall'; }
             // v2.0.56 stream-path ban detection — same 2-strike logic as
             // non-stream. See nonStreamResponse for rationale.
@@ -2448,6 +2477,13 @@ function streamResponse(id, created, model, modelKey, provider, messages, cascad
             }
             if (isRateLimit && strictReuse && checkedOutReuseEntry && fpBefore && checkedOutReuseEntry.apiKey === currentApiKey) {
               log.info(`Chat[${reqId}]: strict reuse preserved cascade after rate limit`);
+              break;
+            }
+            // v2.0.61 (#113): policy refusal isn't account-bound, drop
+            // out of the retry loop immediately and let the SSE error
+            // path emit a 451-style chunk to the client.
+            if (isPolicyBlocked) {
+              log.warn(`Chat[${reqId}] stream: policy_blocked on ${currentApiKey?.slice(0, 12)}..., not retrying`);
               break;
             }
             // Retry only if nothing has been streamed yet AND it's a retryable error

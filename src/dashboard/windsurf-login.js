@@ -56,13 +56,35 @@ async function postAuthDualPath(body, fingerprint, proxy) {
   throw lastErr || new Error('PostAuth: both endpoints failed');
 }
 
-async function oneTimeTokenDualPath(body, fingerprint, proxy) {
+async function oneTimeTokenDualPath(body, fingerprint, proxy, preferredHost = null) {
+  // v2.0.61 (#114): pin OneTimeAuthToken to whichever host PostAuth used.
+  // The session token gateways aren't symmetric — a token minted by
+  // windsurf.com/_backend may be rejected as "invalid token" on
+  // server.self-serve.windsurf.com (and vice versa). When we know which
+  // host PostAuth just talked to, retry order is forced to put it first
+  // so we don't accidentally replay the token across host boundaries.
   const headers = buildJsonHeaders(fingerprint, body, { 'Connect-Protocol-Version': '1' });
+  const orderedHosts = preferredHost === 'legacy'
+    ? [[WINDSURF_ONE_TIME_TOKEN_URL, 'legacy'], [WINDSURF_ONE_TIME_TOKEN_URL_NEW, 'new']]
+    : [[WINDSURF_ONE_TIME_TOKEN_URL_NEW, 'new'], [WINDSURF_ONE_TIME_TOKEN_URL, 'legacy']];
   let lastErr;
-  for (const [url, label] of [[WINDSURF_ONE_TIME_TOKEN_URL_NEW, 'new'], [WINDSURF_ONE_TIME_TOKEN_URL, 'legacy']]) {
+  for (const [url, label] of orderedHosts) {
     try {
       const res = await httpsRequest(url, { method: 'POST', headers }, body, proxy);
-      if (res.status >= 400 && res.status < 500) return { res, label };
+      // 4xx response from the preferred host is meaningful — don't
+      // bother trying the other host if the token is genuinely
+      // invalid. We only fall through on 5xx / network errors.
+      if (res.status >= 400 && res.status < 500 && label === orderedHosts[0][1]) {
+        // Persist preferred-host 4xx so caller can surface a useful error
+        // instead of secretly trying the other host (which would yield
+        // a different but equally unhelpful error).
+        return { res, label };
+      }
+      if (res.status >= 400 && res.status < 500) {
+        // Cross-host 4xx — keep looping just in case but record the err.
+        lastErr = new Error(`OneTimeToken ${label} HTTP ${res.status}: ${JSON.stringify(res.data).slice(0, 120)}`);
+        continue;
+      }
       if (res.status >= 200 && res.status < 300 && res.data?.authToken) {
         return { res, label };
       }
@@ -417,8 +439,12 @@ async function windsurfLoginViaAuth1(email, password, fingerprint, proxy) {
   log.info(`Windsurf PostAuth OK (${bridgeLabel}): ${email} account=${bridgeRes.data.accountId || 'unknown'}`);
 
   const ottBody = JSON.stringify({ authToken: sessionToken });
-  // v2.0.57 (Fix 2): dual-path GetOneTimeAuthToken — same migration as PostAuth.
-  const { res: ottRes, label: ottLabel } = await oneTimeTokenDualPath(ottBody, fingerprint, proxy);
+  // v2.0.61 (#114): pin OneTimeAuthToken to the SAME host PostAuth just
+  // used. Cross-host token replay was failing with "invalid token (error
+  // ID ...)" because session tokens aren't fully symmetric across new
+  // (windsurf.com/_backend) and legacy (server.self-serve.windsurf.com)
+  // gateways yet during this half-migration window.
+  const { res: ottRes, label: ottLabel } = await oneTimeTokenDualPath(ottBody, fingerprint, proxy, bridgeLabel);
 
   if (ottRes.status >= 400 || !ottRes.data?.authToken) {
     throw new Error(`ERR_TOKEN_FETCH_FAILED:${JSON.stringify(ottRes.data).slice(0, 200)}`);
