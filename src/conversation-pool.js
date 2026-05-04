@@ -545,6 +545,14 @@ export function checkout(fingerprint, callerKey = '', expected = null) {
 /**
  * Store (or restore) a conversation entry under a new fingerprint.
  *
+ * `fingerprint` accepts a single string OR an array of strings. When
+ * an array is given the SAME entry is indexed under each fingerprint —
+ * used by v2.0.87 auto-fallback (#129 wnfilm) to keep the cascade
+ * findable under both the original-model fingerprint AND the
+ * fallback-model fingerprint, so the next turn from the client (under
+ * the original model name) doesn't miss the pool and force the LLM to
+ * re-read history from scratch.
+ *
  * `ttlHintMs` (optional) extends this entry's expiry past the pool's
  * default 30 min — used to honour Anthropic prompt-caching markers that
  * request a 1h ttl. Pass `undefined` (default) to keep the existing
@@ -554,7 +562,11 @@ export function checkout(fingerprint, callerKey = '', expected = null) {
  * 1h window doesn't outlive its source request (MED-2).
  */
 export function checkin(fingerprint, entry, callerKey = '', ttlHintMs) {
-  if (!fingerprint || !entry) return;
+  if (!entry) return;
+  const fingerprints = Array.isArray(fingerprint)
+    ? fingerprint.filter((fp) => typeof fp === 'string' && fp)
+    : (fingerprint ? [fingerprint] : []);
+  if (!fingerprints.length) return;
   const now = Date.now();
   let resolvedHint;
   if (ttlHintMs === undefined) {
@@ -564,21 +576,27 @@ export function checkin(fingerprint, entry, callerKey = '', ttlHintMs) {
   } else {
     resolvedHint = ttlHintMs;
   }
-  _pool.set(fingerprint, {
-    cascadeId: entry.cascadeId,
-    sessionId: entry.sessionId,
-    lsPort: entry.lsPort,
-    lsGeneration: entry.lsGeneration,
-    apiKey: entry.apiKey,
-    callerKey: callerKey || entry.callerKey || '',
-    stepOffset: Number.isFinite(entry.stepOffset) ? entry.stepOffset : 0,
-    generatorOffset: Number.isFinite(entry.generatorOffset) ? entry.generatorOffset : 0,
-    historyCoverage: entry.historyCoverage || null,
-    createdAt: entry.createdAt || now,
-    lastAccess: now,
-    ...(Number.isFinite(resolvedHint) && resolvedHint > 0 ? { ttlHintMs: resolvedHint } : {}),
-  });
-  stats.stores++;
+  // Build the canonical entry once, then write under each requested
+  // fingerprint. Each Map slot holds a separate object instance so a
+  // future invalidate/checkout under one key doesn't accidentally
+  // mutate the others.
+  for (const fp of fingerprints) {
+    _pool.set(fp, {
+      cascadeId: entry.cascadeId,
+      sessionId: entry.sessionId,
+      lsPort: entry.lsPort,
+      lsGeneration: entry.lsGeneration,
+      apiKey: entry.apiKey,
+      callerKey: callerKey || entry.callerKey || '',
+      stepOffset: Number.isFinite(entry.stepOffset) ? entry.stepOffset : 0,
+      generatorOffset: Number.isFinite(entry.generatorOffset) ? entry.generatorOffset : 0,
+      historyCoverage: entry.historyCoverage || null,
+      createdAt: entry.createdAt || now,
+      lastAccess: now,
+      ...(Number.isFinite(resolvedHint) && resolvedHint > 0 ? { ttlHintMs: resolvedHint } : {}),
+    });
+    stats.stores++;
+  }
   prune(now);
 }
 

@@ -1208,18 +1208,14 @@ export function mergeReasoningEffortIntoModel(reqModel, body) {
 export function shouldAutoFallback(body, context, result) {
   if (body?.stream) return false;
   if (context?.__fallbackAttempt) return false;
-  // v2.0.86 (#129 wnfilm regression): default OFF. v2.0.85 had this
-  // default ON which was the right intent (less work for the client)
-  // but had a side-effect on cascade reuse — the fallback cascade is
-  // stored in the pool under the FALLBACK model fingerprint, so the
-  // client's NEXT turn (asking for the original model) misses pool
-  // and effectively starts a new conversation. Clients that depend
-  // on cascade reuse (Claude Code with full-history-elision agents)
-  // see the model "forget" earlier turns. Until v2.0.87 ships
-  // proper alias-key writes (same cascade indexed under both model
-  // names), gate this behind explicit env opt-in so the default
-  // behaviour stays predictable.
-  if (process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT !== '1') return false;
+  // v2.0.85 default ON → v2.0.86 default OFF (regression #129) →
+  // v2.0.87 default ON again now that the cascade pool indexes the
+  // fallback cascade under BOTH the original and the fallback model
+  // fingerprint (alias write in conversation-pool.js + chat.js inner
+  // — see context.__aliasModelKey threading). This means the next
+  // turn from the client (under the original model name) finds the
+  // cascade in the pool and reuse stays intact across the fallback.
+  if (process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT === '0') return false;
   const err = result?.body?.error;
   if (!err) return false;
   if (err.type !== 'rate_limit_exceeded') return false;
@@ -1235,7 +1231,10 @@ export async function handleChatCompletions(body, context = {}) {
     log.info(`auto-fallback: ${originalModel} → ${fallbackModel} (whole pool rate_limited)`);
     const fallbackResult = await _handleChatCompletionsInner(
       { ...body, model: fallbackModel },
-      { ...context, __fallbackAttempt: true },
+      // __aliasModelKey carries the ORIGINAL model name into the
+      // inner handler so the cascade pool checkin can dual-index
+      // the entry — fixes #129 reuse miss after fallback.
+      { ...context, __fallbackAttempt: true, __aliasModelKey: originalModel },
     );
     // Restore original model id in the response body so client code
     // matching on `response.model === requested model` still works.
@@ -1931,7 +1930,11 @@ async function _handleChatCompletionsInner(body, context = {}) {
     const result = await nonStreamResponse(
       client, chatId, created, displayModel, routingModelKey, messages, cascadeMessages, modelEnum, modelUid,
       useCascade, acct.apiKey, ckey,
-      reuseEnabled ? { reuseEntry, lsPort: ls.port, apiKey: acct.apiKey, callerKey, cachePolicy, fpOpts } : null,
+      // v2.0.87 (#129) — aliasModelKey is set by the outer wrapper
+      // when this handler is the second pass of an auto-fallback
+      // retry; it carries the ORIGINAL model name the client asked
+      // for so the cascade pool entry gets indexed under both keys.
+      reuseEnabled ? { reuseEntry, lsPort: ls.port, apiKey: acct.apiKey, callerKey, cachePolicy, fpOpts, aliasModelKey: context.__aliasModelKey || null } : null,
       modelInfo?.provider || null,
       emulateTools, toolPreamble, wantJson, cachePolicy, wantThinking, tools, body.__route || 'chat',
       nativeOpts,
@@ -2332,15 +2335,28 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
 
     // Check the cascade back into the pool under the *post-turn* fingerprint
     // so the next request in the same conversation can resume it.
+    //
+    // v2.0.87 (#129 wnfilm): when this request is an auto-fallback retry
+    // (outer wrapper rewrote body.model from the original max → xhigh),
+    // ALSO write the entry under the original modelKey's fingerprint.
+    // The next turn from the client will arrive with the original model
+    // name and would otherwise miss the pool, dropping cascade reuse and
+    // making the model "forget" prior turns for clients that don't
+    // re-send full history each turn.
     if (poolCtx && cascadeMeta?.cascadeId && (allText || toolCalls.length)) {
       const turnComplete = appendAssistantTurn(messages, allText, toolCalls);
       const fpAfter = fingerprintAfter(turnComplete, modelKey, poolCtx.callerKey || '', poolCtx.fpOpts);
+      const aliasModelKey = poolCtx.aliasModelKey;
+      const fpAfterAlias = aliasModelKey && aliasModelKey !== modelKey
+        ? fingerprintAfter(turnComplete, aliasModelKey, poolCtx.callerKey || '', poolCtx.fpOpts)
+        : null;
+      const fingerprints = fpAfterAlias ? [fpAfter, fpAfterAlias] : fpAfter;
       const ttlHint = ttlHintFromCachePolicy(poolCtx.cachePolicy);
       // Explicit 0 (not undefined) clears any inherited 1h hint when the
       // current request didn't ask for it (MED-2). ttlHintFromCachePolicy
       // returns undefined for "no opinion"; pass 0 when we know the user
       // wants the default TTL.
-      poolCheckin(fpAfter, {
+      poolCheckin(fingerprints, {
         cascadeId: cascadeMeta.cascadeId,
         sessionId: cascadeMeta.sessionId,
         lsPort: poolCtx.lsPort,
