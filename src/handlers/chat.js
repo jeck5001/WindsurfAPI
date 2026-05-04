@@ -1208,7 +1208,18 @@ export function mergeReasoningEffortIntoModel(reqModel, body) {
 export function shouldAutoFallback(body, context, result) {
   if (body?.stream) return false;
   if (context?.__fallbackAttempt) return false;
-  if (process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT === '0') return false;
+  // v2.0.86 (#129 wnfilm regression): default OFF. v2.0.85 had this
+  // default ON which was the right intent (less work for the client)
+  // but had a side-effect on cascade reuse — the fallback cascade is
+  // stored in the pool under the FALLBACK model fingerprint, so the
+  // client's NEXT turn (asking for the original model) misses pool
+  // and effectively starts a new conversation. Clients that depend
+  // on cascade reuse (Claude Code with full-history-elision agents)
+  // see the model "forget" earlier turns. Until v2.0.87 ships
+  // proper alias-key writes (same cascade indexed under both model
+  // names), gate this behind explicit env opt-in so the default
+  // behaviour stays predictable.
+  if (process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT !== '1') return false;
   const err = result?.body?.error;
   if (!err) return false;
   if (err.type !== 'rate_limit_exceeded') return false;

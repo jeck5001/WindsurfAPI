@@ -27,9 +27,9 @@ describe('shouldAutoFallback — gating decision', () => {
     else process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = savedEnv;
   });
 
-  it('default ON: rate_limit + fallback_model → fallback', () => {
+  it('v2.0.86 default OFF: rate_limit + fallback_model → no fallback (cascade reuse continuity)', () => {
     delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
-    assert.equal(shouldAutoFallback(baseBody, {}, rateLimitResult), true);
+    assert.equal(shouldAutoFallback(baseBody, {}, rateLimitResult), false);
   });
 
   it('env =0 → no fallback', () => {
@@ -43,23 +43,23 @@ describe('shouldAutoFallback — gating decision', () => {
   });
 
   it('stream request → no fallback (chunks may already be sent)', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     assert.equal(shouldAutoFallback({ ...baseBody, stream: true }, {}, rateLimitResult), false);
   });
 
   it('already a fallback attempt → no recursive retry', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     assert.equal(shouldAutoFallback(baseBody, { __fallbackAttempt: true }, rateLimitResult), false);
   });
 
   it('no fallback_model in error → no fallback', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     const noFallback = { status: 429, body: { error: { type: 'rate_limit_exceeded' } } };
     assert.equal(shouldAutoFallback(baseBody, {}, noFallback), false);
   });
 
   it('non-rate-limit error → no fallback', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     const otherErr = {
       status: 502,
       body: { error: { type: 'upstream_error', fallback_model: 'claude-opus-4-7-xhigh' } },
@@ -68,13 +68,13 @@ describe('shouldAutoFallback — gating decision', () => {
   });
 
   it('successful response → no fallback', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     const ok = { status: 200, body: { id: 'x', choices: [] } };
     assert.equal(shouldAutoFallback(baseBody, {}, ok), false);
   });
 
   it('null result → no fallback (defensive)', () => {
-    delete process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT;
+    process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT = '1';
     assert.equal(shouldAutoFallback(baseBody, {}, null), false);
     assert.equal(shouldAutoFallback(baseBody, {}, undefined), false);
   });
