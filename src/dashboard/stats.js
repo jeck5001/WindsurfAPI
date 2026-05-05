@@ -2,7 +2,8 @@
  * Request statistics collector with debounced JSON persistence.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { writeJsonAtomic } from '../fs-atomic.js';
 import { join } from 'path';
 import { config } from '../config.js';
 
@@ -16,6 +17,21 @@ const _state = {
   modelCounts: {},    // { "gpt-4o-mini": { requests, success, errors, totalMs } }
   accountCounts: {},  // { "abc123": { requests, success, errors } }
   hourlyBuckets: [],  // [{ hour: "2026-04-09T07:00:00Z", requests, errors }]
+  // v2.0.69 (#118 wnfilm) — bucket-level token totals so the dashboard
+  // can show fresh_input / cache_read / cache_write / output without
+  // having to recompute from the per-request usage stream. Keyed by
+  // bucket so summing across the proxy lifetime is just `totals[k]`.
+  tokenTotals: {
+    fresh_input: 0,
+    cache_read: 0,
+    cache_write: 0,
+    output: 0,
+    total: 0,
+    requests_with_usage: 0,
+  },
+  // v2.0.91 — track upstream rejection/cooldown events
+  policyBlockedCount: 0,
+  rateLimitedCount: 0,
 };
 
 // Load persisted stats
@@ -32,7 +48,7 @@ function scheduleSave() {
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(() => {
     try {
-      writeFileSync(STATS_FILE, JSON.stringify(_state, null, 2));
+      writeJsonAtomic(STATS_FILE, _state);
     } catch {}
   }, 5000);
 }
@@ -126,6 +142,49 @@ export function resetStats() {
   _state.modelCounts = {};
   _state.accountCounts = {};
   _state.hourlyBuckets = [];
+  _state.tokenTotals = {
+    fresh_input: 0, cache_read: 0, cache_write: 0,
+    output: 0, total: 0, requests_with_usage: 0,
+  };
   _state.startedAt = Date.now();
+  scheduleSave();
+}
+
+/**
+ * v2.0.69 (#118): record per-request token bucket totals so the dashboard
+ * can show real fresh-input vs cache-read vs cache-write breakdown
+ * instead of the conflated prompt_tokens number.
+ *
+ * Accepts the OpenAI-shaped usage object that buildUsageBody returns —
+ * cascade_breakdown is the authoritative source when present, otherwise
+ * fall back to standard fields.
+ */
+export function recordTokenUsage(usage) {
+  if (!usage || typeof usage !== 'object') return;
+  const bd = usage.cascade_breakdown || null;
+  const fresh = bd?.fresh_input_tokens ?? Math.max(0, (usage.prompt_tokens || 0) - (usage.prompt_tokens_details?.cached_tokens || usage.cache_read_input_tokens || 0));
+  const cacheR = bd?.cache_read_tokens ?? (usage.prompt_tokens_details?.cached_tokens || usage.cache_read_input_tokens || 0);
+  const cacheW = bd?.cache_write_tokens ?? (usage.cache_creation_input_tokens || 0);
+  const output = bd?.output_tokens ?? (usage.completion_tokens || usage.output_tokens || 0);
+  if (!fresh && !cacheR && !cacheW && !output) return;
+  if (!_state.tokenTotals) {
+    _state.tokenTotals = { fresh_input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests_with_usage: 0 };
+  }
+  _state.tokenTotals.fresh_input += fresh;
+  _state.tokenTotals.cache_read += cacheR;
+  _state.tokenTotals.cache_write += cacheW;
+  _state.tokenTotals.output += output;
+  _state.tokenTotals.total += fresh + cacheR + cacheW + output;
+  _state.tokenTotals.requests_with_usage += 1;
+  scheduleSave();
+}
+
+export function recordPolicyBlocked() {
+  _state.policyBlockedCount = (_state.policyBlockedCount || 0) + 1;
+  scheduleSave();
+}
+
+export function recordRateLimited() {
+  _state.rateLimitedCount = (_state.rateLimitedCount || 0) + 1;
   scheduleSave();
 }

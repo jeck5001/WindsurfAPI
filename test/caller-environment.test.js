@@ -115,7 +115,7 @@ describe('extractCallerEnvironment', () => {
 
   it('rejects values that are control-character noise or our own redaction marker', () => {
     const messages = [
-      { role: 'system', content: 'Working directory: …' },
+      { role: 'system', content: 'Working directory: <workspace>' },
     ];
     assert.equal(extractCallerEnvironment(messages), '');
   });
@@ -124,6 +124,228 @@ describe('extractCallerEnvironment', () => {
     assert.equal(extractCallerEnvironment(null), '');
     assert.equal(extractCallerEnvironment(undefined), '');
     assert.equal(extractCallerEnvironment('not an array'), '');
+  });
+
+  // ───── #100 follow-up: bare-path fallback when no <env> block ─────
+  describe('bare-path cwd fallback (#100)', () => {
+    it('lifts a Windows path glued to Chinese text in the first user message', () => {
+      // Real yunduobaba prompt — no <env>, no separator between path and CJK.
+      const messages = [
+        { role: 'user', content: 'C:\\Users\\renfei\\Downloads\\WindsurfAPI-master\\WindsurfAPI-master分析下这个项目' },
+      ];
+      const out = extractCallerEnvironment(messages);
+      assert.equal(out, '- Working directory: C:\\Users\\renfei\\Downloads\\WindsurfAPI-master\\WindsurfAPI-master');
+    });
+
+    it('lifts a Unix path at the start of a user prompt', () => {
+      const messages = [
+        { role: 'user', content: '/home/user/projects/myproj 帮我分析' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /\/home\/user\/projects\/myproj/);
+    });
+
+    it('lifts a Mac /Users path with no separator', () => {
+      const messages = [
+        { role: 'user', content: '/Users/jane/code/app please review' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /\/Users\/jane\/code\/app/);
+    });
+
+    it('lifts a tilde path', () => {
+      const messages = [
+        { role: 'user', content: '~/dotfiles 看看这个' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /~\/dotfiles/);
+    });
+
+    it('rejects a path that ends in a common file extension (single-file reference)', () => {
+      const messages = [
+        { role: 'user', content: 'C:\\Users\\me\\notes.md 解释这个文件' },
+      ];
+      // The file path is a target, not a cwd. Should not lift.
+      assert.equal(extractCallerEnvironment(messages), '');
+    });
+
+    it('does NOT trigger when the canonical extractor already found cwd', () => {
+      // Bare-path fallback is a last-resort. If <env> already gave us cwd we use that.
+      const messages = [
+        { role: 'system', content: 'Working directory: /Users/dev/proj' },
+        { role: 'user', content: 'C:\\some\\windows\\path 分析' },
+      ];
+      const out = extractCallerEnvironment(messages);
+      assert.match(out, /\/Users\/dev\/proj/);
+      assert.doesNotMatch(out, /windows\\path/);
+    });
+
+    it('only scans the first user message (later assistant/tool replies do not count)', () => {
+      const messages = [
+        { role: 'user', content: 'no path here' },
+        { role: 'assistant', content: 'I see C:\\some\\path in some logs' },
+      ];
+      assert.equal(extractCallerEnvironment(messages), '');
+    });
+
+    it('only scans the leading 200 chars of a user message (mid-prose paths skipped)', () => {
+      const head = 'I have been wondering for a long time about a thing in the project that lives somewhere in my filesystem and I think it might be useful to look there. The path I have in mind is /home/user/proj but please confirm.';
+      assert.ok(head.length > 200);
+      const messages = [{ role: 'user', content: head }];
+      // The path appears past char 200 → fallback should NOT trigger.
+      assert.equal(extractCallerEnvironment(messages), '');
+    });
+
+    it('rejects too-short fragments like /a or C:\\', () => {
+      assert.equal(extractCallerEnvironment([{ role: 'user', content: '/a please look' }]), '');
+      assert.equal(extractCallerEnvironment([{ role: 'user', content: 'C:\\ open this' }]), '');
+    });
+
+    it('handles content-block array with a path in the first text block', () => {
+      const messages = [
+        { role: 'user', content: [
+          { type: 'text', text: 'D:\\Project\\WindsurfAPI 你看一下' },
+        ]},
+      ];
+      assert.match(extractCallerEnvironment(messages), /D:\\Project\\WindsurfAPI/);
+    });
+
+    // ───── #100 follow-up #2 (yunduobaba): Claude Code <system-reminder> wrappers ─────
+    //
+    // Claude Code's hooks inject one or more <system-reminder>...</system-reminder>
+    // blocks at the very top of every user turn — frequently 1–5 KB
+    // (skills list, available tools, MCP server hints, todo state). That
+    // pushes the path the user actually typed past the 300-char head and
+    // the original pass-1 scan misses it. Real reproduction from the
+    // user's debug log: lastUser=len=14095 with the path at the very
+    // start of the *user's* prose but buried under reminder wrappers.
+
+    it('lifts a path from after a 1KB <system-reminder> block (the #100 follow-up bug)', () => {
+      const reminder = '<system-reminder>' + 'x'.repeat(1000) + '</system-reminder>\n\n';
+      const messages = [
+        { role: 'user', content: reminder + 'C:\\Users\\renfei\\Downloads\\WindsurfAPI-master 分析下这个项目' },
+      ];
+      const out = extractCallerEnvironment(messages);
+      assert.match(out, /C:\\Users\\renfei\\Downloads\\WindsurfAPI-master/,
+        'path past 300 chars but at start of post-reminder content must lift');
+    });
+
+    it('lifts a path from after multiple stacked <system-reminder> blocks', () => {
+      const r1 = '<system-reminder>' + 'a'.repeat(800) + '</system-reminder>';
+      const r2 = '<system-reminder>' + 'b'.repeat(800) + '</system-reminder>';
+      const r3 = '<system-reminder>' + 'c'.repeat(800) + '</system-reminder>';
+      const messages = [
+        { role: 'user', content: `${r1}\n${r2}\n${r3}\n\n/home/dev/myproj 帮我看下` },
+      ];
+      assert.match(extractCallerEnvironment(messages), /\/home\/dev\/myproj/);
+    });
+
+    it('does NOT match a path buried in prose after stripping reminders', () => {
+      // Pass 2 must remain anchored — only paths at the start of the
+      // unwrapped content count. A reminder followed by prose followed
+      // by a path is still a mid-prose mention, not a cwd hint.
+      const reminder = '<system-reminder>' + 'x'.repeat(500) + '</system-reminder>\n\n';
+      const messages = [
+        { role: 'user', content: reminder + 'I was wondering about /home/user/proj because something something' },
+      ];
+      assert.equal(extractCallerEnvironment(messages), '');
+    });
+
+    it('skips pass 2 entirely when no <system-reminder> wrapper is present', () => {
+      // Cheap-out: if there's no reminder wrapper there's nothing to strip,
+      // and the original pass-1 result already covers the case.
+      const messages = [
+        { role: 'user', content: 'just a question with no path and no reminder' },
+      ];
+      assert.equal(extractCallerEnvironment(messages), '');
+    });
+  });
+
+  // ───── #106 / #107 (zhangzhang-bit): adjective-prefixed cwd + bullet fallback ─────
+  //
+  // Two real-world failure modes from a Claude Code 2.x system prompt:
+  //
+  //   (A) The canonical key is preceded by an adjective:
+  //         "- Primary working directory: D:\Project\foo"
+  //       The old regex only matched bare "Working directory" so this
+  //       lifted as nothing.
+  //
+  //   (B) The system prompt mentions "current working directory" in
+  //       prose first (no path adjacent), and the actual cwd appears
+  //       later as a standalone bullet line. Old regex stopped at the
+  //       first textual hit and returned empty.
+
+  describe('Claude Code 2.x adjective + bullet cwd (#106 / #107)', () => {
+    it('lifts cwd from "Primary working directory: ..." (Claude Code 2.x phrasing)', () => {
+      const messages = [
+        { role: 'system', content: '# Environment\nYou have been invoked in the following environment:\n - Primary working directory: D:\\Project\\WindsurfAPI\n - Is a git repository: true\n - Platform: win32\n' },
+        { role: 'user', content: 'hi' },
+      ];
+      const out = extractCallerEnvironment(messages);
+      assert.match(out, /- Working directory: D:\\Project\\WindsurfAPI/,
+        'adjective-prefixed "Primary working directory" must lift');
+      assert.match(out, /- Is the directory a git repo: true/,
+        'Claude Code 2.x "Is a git repository" must also lift');
+      assert.match(out, /- Platform: win32/);
+    });
+
+    it('lifts cwd via prose-then-bullet pattern (#107 zhangzhang-bit symptom)', () => {
+      // 26 KB system prompt that says "...current working directory."
+      // mid-prose with NO adjacent path, then has the actual cwd in a
+      // bullet much later. Old regex would match the prose form first,
+      // capture nothing, and return empty.
+      const filler = 'lorem ipsum dolor sit amet '.repeat(200); // ~5 KB filler
+      const sys = [
+        'You are an interactive agent that helps users with software engineering tasks and the current working directory.',
+        '',
+        filler,
+        '',
+        '# Environment',
+        ' - Primary working directory: D:\\Project\\foo',
+        ' - Platform: win32',
+      ].join('\n');
+      const messages = [
+        { role: 'system', content: sys },
+        { role: 'user', content: 'analyze this' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /- Working directory: D:\\Project\\foo/,
+        'must skip the keyword-only prose mention and find the bulleted cwd later');
+    });
+
+    it('falls back to a standalone bullet path when no key/value pair exists', () => {
+      // Custom agent emitting just a bullet list of paths with no
+      // explicit "Working directory:" key. Last-resort scanForBulletCwdInSystem
+      // should pick the first absolute-looking path.
+      const messages = [
+        { role: 'system', content: 'Environment facts:\n - D:\\Project\\foo\n - some other note' },
+        { role: 'user', content: 'hi' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /- Working directory: D:\\Project\\foo/);
+    });
+
+    it('bullet-fallback ignores file-extension paths and our redaction marker', () => {
+      // A bullet pointing at a single file is not a cwd hint.
+      const messages = [
+        { role: 'system', content: 'Files of interest:\n - D:\\Project\\foo\\readme.md\n - <workspace>' },
+        { role: 'user', content: 'hi' },
+      ];
+      assert.equal(extractCallerEnvironment(messages), '',
+        'file-target bullets and the <workspace> redaction marker must not lift as cwd');
+    });
+
+    it('bullet-fallback only scans system messages (chat-mention paths do not count)', () => {
+      const messages = [
+        { role: 'system', content: 'no env here' },
+        { role: 'user', content: 'I was browsing /home/dev/random earlier — unrelated' },
+      ];
+      assert.equal(extractCallerEnvironment(messages), '',
+        'a path mentioned in a user chat message must not be promoted to cwd via the system-bullet fallback');
+    });
+
+    it('matches the canonical "Working directory" form as before (back-compat)', () => {
+      const messages = [
+        { role: 'system', content: '<env>\nWorking directory: /Users/jane/proj\n</env>' },
+        { role: 'user', content: 'hi' },
+      ];
+      assert.match(extractCallerEnvironment(messages), /- Working directory: \/Users\/jane\/proj/);
+    });
   });
 });
 

@@ -132,6 +132,11 @@ describe('deprecated model markers', () => {
     'gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-5-mini',
     'deepseek-v3', 'deepseek-v3-2', 'deepseek-r1',
     'grok-3-mini', 'qwen-3',
+    // v2.0.51 #109 — verified broken in production:
+    //   3.5/3.7 Claude legacy: "neither PlanModel nor RequestedModel specified"
+    //   adaptive/arena-*: "unknown model UID ... model not found"
+    'claude-3.5-sonnet', 'claude-3.7-sonnet', 'claude-3.7-sonnet-thinking',
+    'adaptive', 'arena-fast', 'arena-smart',
   ];
 
   for (const key of KNOWN_DEPRECATED) {

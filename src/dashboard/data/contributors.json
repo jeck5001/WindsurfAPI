@@ -1,6 +1,33 @@
 {
   "contributors": [
     {
+      "login": "dwgx",
+      "pr": 0,
+      "weight": "GOD",
+      "weightLabel": "项目作者 · 反代架构 / 协议翻译 / 部署 / 全部 release",
+      "mergedAt": "2026-04-01",
+      "title": "feat: WindsurfAPI — 零 npm 依赖反代",
+      "summary": "项目作者。从 0 到 v2.0.x 一路把 Windsurf 的 Cascade gRPC 反代成 OpenAI / Anthropic / Responses 三协议、零 npm 依赖、双皮 dashboard、多账号池 + tier 管理 + 工具协议翻译 + 路径 sanitize / identity neutralize / cascade reuse / drought mode / 后台改密码 / brute-force lockout / 封号检测 + GHCR 自动 release。所有架构决策、安全审计 follow-up、上游迁移跟进、issue triage、PR review 都在这里。"
+    },
+    {
+      "login": "aict666",
+      "pr": 54,
+      "weight": "MR",
+      "weightLabel": "四次出手累计：fingerprint + tier 识别 + redact + Claude Code 工具流（多次 S+ 累积）",
+      "mergedAt": "2026-04-25",
+      "title": "fix: bring Claude Code tool-call flow back to Anthropic-equivalent behaviour",
+      "summary": "aict666 从 #44 到 #54 连续四次出手 #44 #51 #53 #54，每条都是 S+ 级别的根因修复 — 单次贡献已经满 S+，累积四次跨 fingerprint + tier 识别 + sanitize marker + Claude Code 工具流四个不同子系统，质量稳定，是反代架构稳定期最重要的外部贡献者。这条记录（基于 PR #54）整体升级到 MR (Mythic Rare) 反映累积影响。Claude Code 走 Anthropic 协议时 tool_use → tool_result 的 ID 关联、stream 事件序列、工具参数 streaming 拼接全部对齐 Anthropic 原生行为，把之前 \"工具调用偶发 ID mismatch / args 串味\" 一类长尾 bug 一次性铲掉。"
+    },
+    {
+      "login": "baily-zhang",
+      "pr": 61,
+      "weight": "LR",
+      "weightLabel": "四次出手 + Opus 4.7 多模态体验救星（项目级架构跳跃）",
+      "mergedAt": "2026-04-25",
+      "title": "fix: 修复 Opus 4.7 Claude Code 上下文爆炸",
+      "summary": "baily-zhang 累计 #36 #45 #61 #62 四个 PR 跨 fingerprint / dashboard / Opus 多模态 / inline-script regression 四个领域，每条都质量过硬。其中 #61 单条把 Opus 4.7 多模态调用从不可用救回来 — 图片 / 二进制 block 历史只留占位符不嵌 base64、Claude Code 长 SP 压缩去 billing header、Opus 4.7 多模态工具请求禁用 user-message tool fallback、窄范围 cascade reuse + 严格账号绑定避免 retry 全量重放、fingerprint 不再 hash 图片 base64 五件事一次办完。配合 #36 #45 #62 累积已是反代复用机制的实质 maintainer。这条记录升级到 LR (Legendary Rare) 反映项目级架构跳跃。"
+    },
+    {
       "login": "sandleft",
       "pr": 72,
       "weight": "S",

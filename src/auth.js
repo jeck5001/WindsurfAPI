@@ -8,7 +8,7 @@
  *   - Token-based registration via api.codeium.com
  */
 
-import { randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync, readdirSync } from 'fs';
 import { config, log } from './config.js';
 import { getEffectiveProxy } from './dashboard/proxy-config.js';
@@ -54,6 +54,109 @@ function positiveIntEnv(name, fallback) {
 
 function rpmLimitFor(account) {
   return TIER_RPM[account.tier || 'unknown'] ?? 20;
+}
+
+// v2.0.57 Fix 4 — quota headroom score. Reads the min of daily% and
+// weekly% from the account's last refreshed credits snapshot. When both
+// are unknown (probe never landed), assume 100 so unprobed accounts
+// don't get demoted to last-pick. Returns 0..100.
+export function quotaScore(account) {
+  const c = account?.credits;
+  if (!c || typeof c !== 'object') return 100;
+  const d = typeof c.dailyPercent === 'number' ? c.dailyPercent : 100;
+  const w = typeof c.weeklyPercent === 'number' ? c.weeklyPercent : 100;
+  return Math.max(0, Math.min(100, Math.min(d, w)));
+}
+
+// v2.0.57 Fix 5 — drought mode. True iff every active account has
+// weeklyPercent < threshold. Operators see this on the dashboard so
+// they can buy more accounts / wait for reset rather than chasing
+// individual rate-limit errors.
+const DROUGHT_THRESHOLD = 5;
+
+export function isDroughtMode() {
+  const eligible = accounts.filter(a => a.status === 'active');
+  if (!eligible.length) return false;
+  let knownCount = 0;
+  let droughtCount = 0;
+  for (const a of eligible) {
+    const c = a?.credits;
+    const w = c && typeof c.weeklyPercent === 'number' ? c.weeklyPercent : null;
+    if (w == null) continue;
+    knownCount++;
+    if (w < DROUGHT_THRESHOLD) droughtCount++;
+  }
+  if (!knownCount) return false; // no quota data yet — assume not drought
+  return droughtCount === knownCount;
+}
+
+// v2.0.58 — drought-mode premium-model gate. Default ON (changes
+// behaviour but drought is exceptional, and operators reported wanting
+// the proxy to stop wasting upstream calls when no quota remains).
+// Toggle via env DROUGHT_RESTRICT_PREMIUM=0 to disable globally, or via
+// the dashboard experimental flag `droughtRestrictPremium` (which the
+// chat path reads through runtime-config).
+function _droughtRestrictEnvDefault() {
+  return process.env.DROUGHT_RESTRICT_PREMIUM !== '0';
+}
+
+export function isDroughtRestrictEnabled() {
+  // env override wins; otherwise consult runtime-config (deferred import
+  // to avoid the same load-order issue documented in validateApiKey).
+  if (process.env.DROUGHT_RESTRICT_PREMIUM === '0') return false;
+  if (process.env.DROUGHT_RESTRICT_PREMIUM === '1') return true;
+  // No explicit env → use runtime-config default (true).
+  if (_droughtRestrictResolver) {
+    try { return !!_droughtRestrictResolver(); } catch { /* fall through */ }
+  }
+  return _droughtRestrictEnvDefault();
+}
+
+let _droughtRestrictResolver = null;
+export function setDroughtRestrictResolver(fn) {
+  _droughtRestrictResolver = typeof fn === 'function' ? fn : null;
+}
+
+/**
+ * True when drought mode is active AND the operator has restriction
+ * enabled AND the requested model is NOT in the free-tier allowlist.
+ * Free-tier models keep running because they don't burn weekly quota
+ * the way premium models do.
+ */
+export function isModelBlockedByDrought(modelKey) {
+  if (!modelKey) return false;
+  if (!isDroughtRestrictEnabled()) return false;
+  if (!isDroughtMode()) return false;
+  const freeModels = new Set(getTierModels('free'));
+  return !freeModels.has(modelKey);
+}
+
+export function getDroughtSummary() {
+  const eligible = accounts.filter(a => a.status === 'active');
+  let lowestWeekly = null;
+  let lowestDaily = null;
+  let knownAccounts = 0;
+  for (const a of eligible) {
+    const c = a?.credits;
+    if (!c) continue;
+    knownAccounts++;
+    if (typeof c.weeklyPercent === 'number') {
+      lowestWeekly = lowestWeekly == null ? c.weeklyPercent : Math.min(lowestWeekly, c.weeklyPercent);
+    }
+    if (typeof c.dailyPercent === 'number') {
+      lowestDaily = lowestDaily == null ? c.dailyPercent : Math.min(lowestDaily, c.dailyPercent);
+    }
+  }
+  return {
+    drought: isDroughtMode(),
+    threshold: DROUGHT_THRESHOLD,
+    activeAccounts: eligible.length,
+    knownAccounts,
+    lowestWeeklyPercent: lowestWeekly,
+    lowestDailyPercent: lowestDaily,
+    restrictEnabled: isDroughtRestrictEnabled(),
+    freeTierModels: getTierModels('free'),
+  };
 }
 
 function pruneRpmHistory(account, now) {
@@ -301,11 +404,40 @@ export async function addAccountByToken(token, label = '') {
 }
 
 /**
- * Add account via email/password is not supported for direct Firebase login.
- * Use token-based auth instead: get a token from windsurf.com/show-auth-token
+ * Add account via email/password.
+ *
+ * Reuses the same Windsurf login pipeline the dashboard's
+ * `processWindsurfLogin` uses: probe Auth1 vs Firebase via
+ * CheckUserLoginMethod (with /_devin-auth/connections fallback), then
+ * register a Codeium api_key. Refresh token (Firebase path) is persisted
+ * so the background renewal loop in checkAndRefreshTokens picks it up.
  */
 export async function addAccountByEmail(email, password) {
-  throw new Error('Direct email/password login is not supported. Use token-based auth: get token from windsurf.com, then POST /auth/login {"token":"..."}');
+  if (!email || !password) {
+    throw new Error('email and password required');
+  }
+  const { windsurfLogin } = await import('./dashboard/windsurf-login.js');
+  const result = await windsurfLogin(email, password, null);
+  if (!result?.apiKey) {
+    throw new Error('Login succeeded but no apiKey returned');
+  }
+  const account = addAccountByKey(result.apiKey, result.name || email);
+  if (account.email !== (result.name || email)) {
+    account.email = result.name || email;
+  }
+  account.method = 'email';
+  if (result.apiServerUrl && !account.apiServerUrl) {
+    account.apiServerUrl = result.apiServerUrl;
+  }
+  if (result.refreshToken || result.idToken) {
+    setAccountTokens(account.id, {
+      refreshToken: result.refreshToken || '',
+      idToken: result.idToken || '',
+    });
+  }
+  saveAccounts();
+  log.info(`Account added via email: ${account.id} (${account.email})`);
+  return account;
 }
 
 /**
@@ -501,11 +633,22 @@ export function getApiKey(excludeKeys = [], modelKey = null) {
   // Pick the account with the fewest in-flight requests first (so a burst
   // of concurrent calls spreads across accounts instead of piling onto a
   // single one that still has RPM headroom — see issue #37). Then prefer
-  // accounts with the highest remaining-ratio, finally least-recently-used.
+  // accounts with the highest quota headroom (v2.0.57 Fix 4 — predictive
+  // pre-warming reads min(daily%, weekly%) so a Trial about to roll over
+  // doesn't keep getting picked over a healthier account). Then RPM
+  // remaining-ratio. Finally least-recently-used.
   candidates.sort((x, y) => {
     const ix = x.account._inflight || 0;
     const iy = y.account._inflight || 0;
     if (ix !== iy) return ix - iy;
+    const qx = quotaScore(x.account);
+    const qy = quotaScore(y.account);
+    // Bucket the score so we don't churn across small noise (e.g. 41 vs
+    // 42). 5%-wide buckets keep the LRU rotation intact when both are
+    // healthy and only kick in when one account is materially lower.
+    const bx = Math.floor(qx / 5);
+    const by = Math.floor(qy / 5);
+    if (bx !== by) return by - bx;
     const rx = (x.limit - x.used) / x.limit;
     const ry = (y.limit - y.used) / y.limit;
     if (ry !== rx) return ry - rx;
@@ -517,12 +660,34 @@ export function getApiKey(excludeKeys = [], modelKey = null) {
   account._rpmHistory.push(reservationTimestamp);
   account.lastUsed = now;
   account._inflight = (account._inflight || 0) + 1;
+  // v2.0.57 Fix 4 — predictive pre-warming. When the chosen account is
+  // running out of quota, fire-and-forget warm up the next-best
+  // candidate so its LS / cascade pool is ready when the chosen one
+  // hits zero on the next call. Throttled per-account to once per 30s
+  // so a long burst of low-quota requests doesn't slam ensureLsForAccount.
+  if (candidates.length >= 2 && quotaScore(account) < DROUGHT_THRESHOLD * 2) {
+    schedulePrewarm(candidates[1].account);
+  }
   return {
     id: account.id, email: account.email, apiKey: account.apiKey,
     apiServerUrl: account.apiServerUrl || '',
     proxy: getEffectiveProxy(account.id) || null,
     reservationTimestamp,
   };
+}
+
+const PREWARM_COOLDOWN_MS = 30_000;
+function schedulePrewarm(nextAccount) {
+  if (!nextAccount) return;
+  const now = Date.now();
+  if (nextAccount._prewarmAt && now - nextAccount._prewarmAt < PREWARM_COOLDOWN_MS) return;
+  nextAccount._prewarmAt = now;
+  // ensureLsForAccount already triggers a cascade warmup; we only need to
+  // kick it off without awaiting.
+  Promise.resolve().then(() => ensureLsForAccount(nextAccount.id)).catch(e => {
+    log.debug(`Prewarm ${nextAccount.id} failed: ${e?.message || e}`);
+  });
+  log.info(`Prewarm: chosen account is low on quota (score ${quotaScore(accounts.find(a => a.id === nextAccount.id) || nextAccount).toFixed(0)}); warming up next candidate ${nextAccount.id}`);
 }
 
 /**
@@ -714,6 +879,13 @@ export function reportSuccess(apiKey) {
     account.status = 'active';
   }
   account.internalErrorStreak = 0;
+  // v2.0.56: any successful chat clears the ban-signal streak — Windsurf's
+  // "Authentication failed" can fire transiently during deploys, so we
+  // only mark banned when the streak isn't broken by a real success.
+  if (account._banSignalCount) {
+    account._banSignalCount = 0;
+    account._banSignalAt = 0;
+  }
 }
 
 /**
@@ -730,6 +902,80 @@ export function reportInternalError(apiKey) {
     account.rateLimitedUntil = Date.now() + 5 * 60 * 1000;
     log.warn(`Account ${account.id} (${account.email}) quarantined 5min after ${account.internalErrorStreak} consecutive upstream internal errors`);
   }
+}
+
+// v2.0.56 (windsurf-assistant-pub inspiration): suspect-ban detection.
+// Match upstream error text against the patterns Windsurf actually
+// returns when an account is suspended / disabled / blocked at the
+// account level (NOT model-level rate limits, which are handled by
+// markRateLimited above). When a ban signal lands twice on the same
+// account within 30 min we promote it to permanent disable so the pool
+// doesn't keep handing out a known-dead key.
+// Patterns ride a bounded `[^.\n]{0,40}` gap so "Your account has been
+// suspended" matches without enabling .* / .+ ReDoS surfaces. Order is
+// most-specific-first.
+const BAN_PATTERNS = [
+  // "account_suspended" / "account-disabled" / "user_banned" — common API
+  // error codes returned as snake/kebab strings. Match the full token.
+  /\b(?:account|user|email|api[_-]?key)[_-](?:suspend(?:ed)?|disabled|banned|revoked|terminated|deactivated|locked|closed)\b/i,
+  // "Your account has been suspended" / "Account banned by upstream" /
+  // "User suspended due to abuse" — a noun + bounded gap + verb form.
+  /\baccount\b[^.\n]{0,40}\b(?:suspend(?:ed)?|disabled|banned|terminated|deactivated|locked|closed)\b/i,
+  /\b(?:user|email)\b[^.\n]{0,40}\b(?:suspend(?:ed)?|disabled|banned|terminated)\b/i,
+  /\bsubscription\b[^.\n]{0,40}\b(?:cancel(?:led|ed)?|terminated|expired|invalid)\b/i,
+  /\bauthentication\b[^.\n]{0,40}\b(?:failed|invalid|denied|revoked)\b/i,
+  /\binvalid\s+api[_\s-]?key\b/i,
+  /\bapi[_\s-]?key\b[^.\n]{0,40}\b(?:revoked|disabled|expired|invalid)\b/i,
+  /\bunauthorized\b[^.\n]{0,40}\b(?:account|key|credential|exist)\b/i,
+  // CN forms — windsurf zh error pages occasionally surface these
+  /账号(?:已)?(?:停用|封禁|禁用|冻结|注销|关闭)/,
+  /(?:用户|邮箱)(?:已)?(?:停用|封禁|禁用)/,
+  /订阅(?:已)?(?:取消|过期|失效)/,
+];
+
+export function looksLikeBanSignal(message) {
+  if (typeof message !== 'string' || !message) return false;
+  return BAN_PATTERNS.some(p => p.test(message));
+}
+
+/**
+ * Report a ban-shaped upstream error. Two hits within `windowMs` (default
+ * 30 min) flip the account to status='banned' and clear in-flight reuse
+ * so it stops getting selected. Single hits are logged but not acted on
+ * — Windsurf occasionally returns "Authentication failed" transiently
+ * during deploys.
+ */
+export function reportBanSignal(apiKey, message, { windowMs = 30 * 60 * 1000 } = {}) {
+  const account = accounts.find(a => a.apiKey === apiKey);
+  if (!account) return false;
+  const now = Date.now();
+  const last = account._banSignalAt || 0;
+  account._banSignalAt = now;
+  account._banSignalCount = (now - last < windowMs) ? (account._banSignalCount || 0) + 1 : 1;
+  account._banSignalLastMessage = String(message || '').slice(0, 240);
+  log.warn(`Account ${account.id} (${account.email}) emitted ban-shaped error #${account._banSignalCount}: "${account._banSignalLastMessage}"`);
+  if (account._banSignalCount >= 2) {
+    account.status = 'banned';
+    account.bannedAt = now;
+    account.bannedReason = account._banSignalLastMessage;
+    saveAccounts();
+    log.error(`Account ${account.id} (${account.email}) marked BANNED after ${account._banSignalCount} ban-shaped errors`);
+    // Drop any cascade-pool entries owned by this key.
+    import('./conversation-pool.js').then(m => m.invalidateFor({ apiKey })).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Reset the ban-signal streak (e.g. after a successful chat). Also clears
+ * status='banned' iff the operator explicitly resets the account.
+ */
+export function clearBanSignals(apiKey) {
+  const account = accounts.find(a => a.apiKey === apiKey);
+  if (!account) return;
+  account._banSignalAt = 0;
+  account._banSignalCount = 0;
 }
 
 // ─── Status ────────────────────────────────────────────────
@@ -1053,20 +1299,33 @@ const PROBE_CANARIES = [
  *      4.6 series etc.) which don't appear in the enum allowlist, and serves
  *      as a fallback if GetUserStatus fails on this LS/account combo.
  */
-let _probeInFlight = false;
+// Per-account in-flight map. The previous global boolean serialized
+// every probe globally, and the dashboard surfaced "skipped" the same
+// way as "not found" -> users with N accounts saw N-1 fake "Account not
+// found" toasts when they bulk-probed. Now each account has its own
+// promise; a duplicate call on the same id returns the in-flight promise
+// so the caller awaits the same result without firing a second probe.
+const _probeInFlight = new Map();
 
 export async function probeAccount(id) {
-  if (_probeInFlight) {
-    log.info(`Probe skipped for ${id}: another probe is already running`);
-    return null;
-  }
-  _probeInFlight = true;
-  try {
+  const existing = _probeInFlight.get(id);
+  if (existing) return existing;
+
   const account = accounts.find(a => a.id === id);
   if (!account) return null;
 
+  const promise = _probeAccountImpl(account).finally(() => {
+    _probeInFlight.delete(id);
+  });
+  _probeInFlight.set(id, promise);
+  return promise;
+}
+
+async function _probeAccountImpl(account) {
+  try {
+
   // ── Step 1: authoritative tier via GetUserStatus ──
-  const status = await fetchUserStatus(id);
+  const status = await fetchUserStatus(account.id);
 
   const { WindsurfClient } = await import('./client.js');
   const { getModelInfo } = await import('./models.js');
@@ -1177,8 +1436,9 @@ export async function probeAccount(id) {
   saveAccounts();
   log.info(`Probe complete for ${account.id}: tier=${account.tier}${status ? ` plan="${status.planName}"` : ''}`);
   return { tier: account.tier, capabilities: account.capabilities };
-  } finally {
-    _probeInFlight = false;
+  } catch (err) {
+    log.error(`Probe failed for ${account.id}: ${err.message}`);
+    throw err;
   }
 }
 
@@ -1205,17 +1465,129 @@ export function isLocalBindHost(bindHost = _bindHost) {
 }
 
 export function safeEqualString(a, b) {
-  const left = Buffer.from(String(a), 'utf8');
-  const right = Buffer.from(String(b), 'utf8');
-  if (left.length !== right.length) return false;
-  return timingSafeEqual(left, right);
+  // Hash-then-compare so the early-return on different lengths can't be
+  // measured by a wall-clock attacker. SHA-256 of any input is 32 bytes,
+  // so timingSafeEqual always sees equal-length buffers and runs in
+  // constant time. The trailing `.length` check restores correctness for
+  // the rare case where two distinct inputs collide on the digest (which
+  // would still need a full preimage attack to construct).
+  const sa = String(a);
+  const sb = String(b);
+  const left = createHash('sha256').update(sa, 'utf8').digest();
+  const right = createHash('sha256').update(sb, 'utf8').digest();
+  return timingSafeEqual(left, right) && sa.length === sb.length;
+}
+
+// v2.0.56: hook lets runtime-config (or future credential sources) supply
+// a live API key. validateApiKey() falls through to config.apiKey when the
+// hook is unset, which is the case during cold boot before runtime-config
+// finishes loading. Set via setApiKeyResolver() from the credential module
+// once it has parsed runtime-config.json.
+let _apiKeyResolver = null;
+export function setApiKeyResolver(fn) {
+  _apiKeyResolver = typeof fn === 'function' ? fn : null;
 }
 
 export function validateApiKey(key) {
-  if (!config.apiKey) return isLocalBindHost(_bindHost);
+  let effectiveKey = config.apiKey;
+  if (_apiKeyResolver) {
+    try {
+      const v = _apiKeyResolver();
+      if (typeof v === 'string') effectiveKey = v;
+    } catch { /* keep env fallback */ }
+  }
+  if (!effectiveKey) return isLocalBindHost(_bindHost);
   if (!key) return false;
-  return safeEqualString(key, config.apiKey);
+  return safeEqualString(key, effectiveKey);
 }
+
+// ─── Brute-force lockout (v2.0.56, CLIProxyAPI-style) ─────────────────
+// Track failed dashboard auth attempts per client IP. After
+// `LOCKOUT_THRESHOLD` failures lock the IP for `LOCKOUT_DURATION_MS`.
+// Idle entries get pruned every `LOCKOUT_CLEANUP_MS`.
+//
+// We export the helpers so the dashboard middleware can drive them and
+// tests can probe behaviour. Numbers mirror CLIProxyAPI's defaults
+// (5 failures / 30 min ban / 2h idle TTL / 1h cleanup interval).
+
+const LOCKOUT_THRESHOLD = 5;
+const LOCKOUT_DURATION_MS = 30 * 60 * 1000;
+const LOCKOUT_IDLE_TTL_MS = 2 * 60 * 60 * 1000;
+const LOCKOUT_CLEANUP_MS = 60 * 60 * 1000;
+const _lockoutAttempts = new Map();
+
+function _now() { return Date.now(); }
+
+export function _resetLockoutForTests() { _lockoutAttempts.clear(); }
+
+export function getLockoutState(ip) {
+  if (!ip) return { count: 0, blockedUntil: 0 };
+  const e = _lockoutAttempts.get(ip);
+  if (!e) return { count: 0, blockedUntil: 0 };
+  return { count: e.count, blockedUntil: e.blockedUntil };
+}
+
+/**
+ * Returns `{ blocked: bool, retryAfterMs: number, count: number }`. Call
+ * BEFORE checking the password — if blocked, reject with 429 / 403 and
+ * skip the comparison entirely so the lockout stays effective even when
+ * the comparison itself is fast.
+ */
+export function checkLockout(ip) {
+  if (!ip) return { blocked: false, retryAfterMs: 0, count: 0 };
+  const e = _lockoutAttempts.get(ip);
+  if (!e) return { blocked: false, retryAfterMs: 0, count: 0 };
+  const now = _now();
+  if (e.blockedUntil > now) {
+    return { blocked: true, retryAfterMs: e.blockedUntil - now, count: e.count };
+  }
+  // Ban expired — reset to give the caller a fresh window. Don't delete
+  // the record; failedAuthAttempt() may add to it again immediately.
+  if (e.blockedUntil > 0 && e.blockedUntil <= now) {
+    e.count = 0;
+    e.blockedUntil = 0;
+  }
+  return { blocked: false, retryAfterMs: 0, count: e.count };
+}
+
+export function failedAuthAttempt(ip) {
+  if (!ip) return { blocked: false, retryAfterMs: 0, count: 0 };
+  const now = _now();
+  let e = _lockoutAttempts.get(ip);
+  if (!e) {
+    e = { count: 0, blockedUntil: 0, lastActivity: now };
+    _lockoutAttempts.set(ip, e);
+  }
+  e.count += 1;
+  e.lastActivity = now;
+  if (e.count >= LOCKOUT_THRESHOLD) {
+    e.blockedUntil = now + LOCKOUT_DURATION_MS;
+    e.count = 0; // reset counter so the next post-ban failure starts fresh
+  }
+  return {
+    blocked: e.blockedUntil > now,
+    retryAfterMs: e.blockedUntil > now ? e.blockedUntil - now : 0,
+    count: e.count,
+  };
+}
+
+export function successfulAuthAttempt(ip) {
+  if (!ip) return;
+  _lockoutAttempts.delete(ip);
+}
+
+function _purgeLockouts() {
+  const now = _now();
+  for (const [ip, e] of _lockoutAttempts) {
+    // Keep active bans regardless of idle time.
+    if (e.blockedUntil > now) continue;
+    if (now - (e.lastActivity || 0) > LOCKOUT_IDLE_TTL_MS) {
+      _lockoutAttempts.delete(ip);
+    }
+  }
+}
+
+setInterval(_purgeLockouts, LOCKOUT_CLEANUP_MS).unref?.();
 
 export function shouldEmitNoAuthWarning(bindHost, hasKey) {
   if (hasKey) return false;
@@ -1227,7 +1599,13 @@ export function shouldEmitNoAuthWarning(bindHost, hasKey) {
 
 export function emitNoAuthWarnings(bindHost = '0.0.0.0') {
   const apiOpen = shouldEmitNoAuthWarning(bindHost, !!config.apiKey);
-  const dashboardOpen = shouldEmitNoAuthWarning(bindHost, !!(config.dashboardPassword || config.apiKey));
+  // v2.0.55 (audit H1): the dashboard write surface no longer trusts
+  // config.apiKey as a fallback admin password on non-local binds, so
+  // the warning fires whenever DASHBOARD_PASSWORD is missing in public
+  // mode — even if API_KEY is set. Without the password the dashboard
+  // fails closed (better than the old privilege-escalation), but the
+  // operator still needs the warning so they explicitly configure one.
+  const dashboardOpen = shouldEmitNoAuthWarning(bindHost, !!config.dashboardPassword);
   if (!apiOpen && !dashboardOpen) return;
   const lines = [
     '+------------------------------------------------------------------+',
@@ -1236,9 +1614,11 @@ export function emitNoAuthWarnings(bindHost = '0.0.0.0') {
     '|                                                                  |',
     '| This server is listening beyond localhost. Set API_KEY before     |',
     '| exposing REST APIs, and set DASHBOARD_PASSWORD for dashboard      |',
-    '| write operations.                                                |',
+    '| write operations (v2.0.55: API_KEY no longer doubles as the       |',
+    '| dashboard admin password on public binds — set both).             |',
     '| 服务正在非本机地址监听。公网/内网暴露前请配置 API_KEY，并为        |',
-    '| Dashboard 写接口配置 DASHBOARD_PASSWORD。                         |',
+    '| Dashboard 写接口配置 DASHBOARD_PASSWORD（v2.0.55 起公网 bind 上    |',
+    '| API_KEY 不再回落作为 Dashboard 密码 — 两个都必须显式配置）。      |',
     '+------------------------------------------------------------------+',
   ];
   for (const line of lines) log.warn(line);

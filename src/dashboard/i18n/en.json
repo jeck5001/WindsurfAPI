@@ -69,6 +69,7 @@
   "action": {
     "checkUpdate": "Check Update",
     "applyUpdate": "Update & Restart",
+    "updateLsBinary": "Update LS",
     "restart": "Restart",
     "reset": "Reset",
     "save": "Save",
@@ -79,6 +80,7 @@
     "confirm": "Confirm",
     "delete": "Delete",
     "refresh": "Refresh",
+    "runNow": "Run now",
     "probe": "Probe",
     "probeTitle": "Probe capabilities",
     "enable": "Enable",
@@ -130,6 +132,14 @@
     "restarting": "Service restarting in background, page will auto-refresh in ~8 seconds...",
     "notGitRepo": "Not a git repository",
     "notGitRepoHint": "Ensure .git directory is present for one-click updates",
+    "selfUpdateUnavailable": "One-click update is unavailable in this deployment",
+    "selfUpdateDockerHint": "Run docker compose pull && docker compose up -d on the host to update. To enable in-dashboard one-click updates for Docker deployments, mount /var/run/docker.sock into the windsurf-api service in docker-compose.yml (note: this grants the container host-root privileges; assess the security tradeoff first).",
+    "dockerSelfUpdateBlocked": "Dashboard docker update currently blocked: {{reason}} {{detail}}",
+    "dockerReady": "Docker self-update ready",
+    "dockerImage": "Image:",
+    "dockerProject": "Compose project:",
+    "dockerUpdating": "Update started: pulling {{image}}; deployer sidecar will recreate the container in ~{{delay}}s…",
+    "dockerSidecarStarted": "Deployer container {{id}} started; this page will auto-refresh",
     "workingDirDirty": "Working directory has local changes",
     "workingDirDirtyHint": "The following files have local changes:<br>{{files}}<br>Continue will overwrite with remote version.",
     "notFetched": "Not fetched",
@@ -238,6 +248,22 @@
     "systemPrompts": {
       "title": "System Prompts",
       "desc": "Tool injection, conversation mode and other built-in prompt templates. Changes take effect immediately; click \"Reset\" to restore defaults."
+    },
+    "credentials": {
+      "title": "Credentials",
+      "desc": "Rotate API_KEY and the dashboard password at runtime. Saved into runtime-config.json and applied immediately — no container restart or .env reload needed. Next request must use the new value; the current session will be asked to re-login."
+    },
+    "quietWindow": {
+      "title": "Auto-update on quiet window",
+      "desc": "Watches per-minute request rate; if it stays at or below the threshold for the full window, auto-runs `docker compose pull && up -d`. 10-min cold-start grace; 24h cooldown after success; failure doesn't trigger cooldown. Requires /var/run/docker.sock mounted into the container (default docker-compose already does).",
+      "enable": "Enable quiet-window auto-update",
+      "hint": "Off by default. Current status: "
+    },
+    "droughtRestrict": {
+      "title": "Block premium models during drought",
+      "desc": "When every active account is below 5% weekly quota, premium model requests (claude-opus / claude-sonnet etc.) are refused with a clean 503 instead of burning the last bit of quota on an upstream 429. Free-tier models (gemini-2.5-flash etc.) still go through. Disable to forward premium requests anyway and accept the upstream rate-limit.",
+      "enable": "Enable drought-mode premium block",
+      "hint": "Default ON. Drought state is auto-detected from the account pool (GET /dashboard/api/drought for live state)."
     },
     "skin": {
       "title": "Interface Style",
@@ -460,6 +486,12 @@
       "title": "Response Cache",
       "subtitle": "{{hits}} hit / {{misses}} miss · {{size}}/{{max}} entries"
     },
+    "tokens": {
+      "title": "Token usage breakdown",
+      "subtitle": {
+        "empty": "no usage data yet"
+      }
+    },
     "banStats": {
       "title": "Health Overview"
     },
@@ -514,6 +546,10 @@
     "title": "Control Panel Login",
     "subtitle": "Please enter the admin password to continue",
     "passwordPlaceholder": "Dashboard Password",
+    "lockedTitle": "Dashboard locked",
+    "lockedDesc": "Server bound to public host without <code>DASHBOARD_PASSWORD</code>. v2.0.55 fail-closed: API_KEY no longer doubles as the dashboard password.",
+    "lockedFix": "Fix:",
+    "lockedDocs": "See",
     "button": "Login",
     "checking": "Checking…",
     "wrong": "Wrong password",
@@ -579,9 +615,34 @@
     "restored": "restored"
   },
 
+  "drought": {
+    "title": "Quota drought:",
+    "body": "Every active account is below the weekly quota threshold — add accounts or wait for reset"
+  },
+
+  "credentials": {
+    "apiKey": "API_KEY",
+    "dashboardPassword": "Dashboard Password",
+    "apiKeyPlaceholder": "New API_KEY (≥ 8 chars; leave blank to clear runtime override)",
+    "dashboardPwPlaceholder": "New dashboard password (≥ 8 chars; leave blank to clear runtime override)",
+    "show": "Show / Hide",
+    "save": "Save",
+    "saved": "Saved",
+    "set": "set",
+    "unset": "unset",
+    "apiKeyHint": "After saving, every chat client must use the new KEY; the old KEY stops working immediately.",
+    "dashboardPwHint": "Stored as a scrypt hash; the current session will be signed out and you'll need to log in again with the new password.",
+    "bruteForceHint": "Brute-force guard: same IP gets locked for 30 minutes after 5 failed dashboard logins (since v2.0.56).",
+    "confirmSave": "After saving, the old value stops working immediately. Continue?",
+    "confirmClear": "Clear the runtime override and fall back to the .env value?"
+  },
+
   "confirm": {
     "restartTitle": "Restart Language Server",
     "restartDesc": "In-progress requests will fail. Continue?",
+    "updateLsTitle": "Update LS Binary",
+    "updateLsDesc": "Download the latest language_server from the WindsurfAPI / Exafunction GitHub release and restart the LS pool. In-flight requests will fail once.",
+    "updateLsButton": "Update",
     "restoreDefaultDesc": "restore to default?",
     "clearPoolDesc": "All active Cascade sessions will be cleared. Continue?"
   },
@@ -694,7 +755,8 @@
     "key": "API Key",
     "source": "Source",
     "importBtn": "Import",
-    "importSuccess": "Imported {{email}}"
+    "importSuccess": "Imported {{email}}",
+    "unavailable": "Available only on localhost deployments — \"local Windsurf\" on a remote server belongs to someone else's machine, not yours."
   },
 
   "account": {
@@ -780,6 +842,21 @@
     "formatError": "Line {{line}} format error"
   },
 
+  "quietWindow": {
+    "status": {
+      "disabled": "disabled",
+      "coldStart": "cold-start grace",
+      "cooldown": "cooldown",
+      "busy": "busy",
+      "eligible": "quiet · eligible"
+    },
+    "never": "never",
+    "lastUpdate": "last update",
+    "loadFailed": "load failed",
+    "triggered": "triggered",
+    "triggerFailed": "trigger failed"
+  },
+
   "toast": {
     "copied": "Copied",
     "saved": "Saved",
@@ -787,6 +864,8 @@
     "refresh": "Refresh",
     "error": "Error",
     "loading": "Loading...",
+    "exportOk": "Downloaded {{filename}}",
+    "exportFailed": "Export failed",
     "enterHostPort": "Please enter host and port first",
     "experimentalEnabled": "Experimental feature enabled",
     "experimentalDisabled": "Experimental feature disabled",
@@ -805,6 +884,16 @@
     "copyFailedError": "Copy failed: {{error}}",
     "enterEmailPassword": "Please enter email and password",
     "restarting": "Language Server restarting...",
+    "lsBinaryUpdating": "Updating LS binary…",
+    "lsBinaryUpdated": "LS binary updated ({{before}} → {{after}}), restarted {{count}} instance(s)",
+    "lsBinaryUpdatedColdPool": "LS binary updated ({{before}} → {{after}}), no running instances; new binary loads on next request",
+    "lsBinaryUpdatedWithErrors": "LS binary updated ({{before}} → {{after}}), restarted {{count}} instance(s) ({{errors}} failed)",
+    "lsBinaryAlreadyCurrent": "LS binary already current (sha:{{sha}}), no update needed",
+    "lsBinaryUpdateFailed": "LS update failed: {{error}}",
+    "lsBinaryUpdateRequestFailed": "LS update request failed: {{error}}",
+    "lsBinaryUnreadable": "LS binary unreadable: {{error}}",
+    "lsBinaryReadFailed": "Failed to read LS info: {{error}}",
+    "lsBinaryStat": "{{path}} · {{sizeMb}} MB · sha256:{{sha}} · installed {{age}}d ago",
     "proxyConfigured": "Account proxy configured",
     "proxyCleared": "Account proxy cleared",
     "globalProxySaved": "Global proxy saved",
@@ -839,7 +928,14 @@
     },
     "searchPlaceholder": "Search log content...",
     "clearView": "Clear View",
-    "viaSSE": "via SSE real-time streaming"
+    "viaSSE": "via SSE real-time streaming",
+    "export": {
+      "all": "All logs",
+      "api": "API request logs",
+      "system": "System runtime logs",
+      "txt": "Plain text",
+      "btn": "Download logs"
+    }
   },
 
   "model": {
@@ -884,6 +980,12 @@
     "firebaseLoadFailed": "Firebase SDK failed to load, please refresh and retry",
     "ERR_EMAIL_PASSWORD_REQUIRED": "Email and password are required",
     "ERR_HOST_PORT_REQUIRED": "Host and port are required",
+    "ERR_SELF_UPDATE_UNAVAILABLE": "One-click update is unavailable for this deployment",
+    "pull-failed": "Failed to pull image",
+    "deployer-pull-failed": "Failed to pull deployer image (docker:24-cli)",
+    "deployer-create-failed": "Failed to create deployer container",
+    "deployer-create-no-id": "Deployer container created but no ID returned",
+    "deployer-start-failed": "Failed to start deployer container",
     "ERR_UNCOMMITTED_CHANGES": "Working directory has uncommitted changes. Force overwrite?",
     "ERR_ACCOUNTS_REQUIRED": "Accounts array is required",
     "ERR_TEXT_REQUIRED": "Text field is required",

@@ -20,7 +20,7 @@ import { dirname, join } from 'path';
 import {
   validateApiKey, isAuthenticated, getAccountList, getAccountCount,
   addAccountByEmail, addAccountByToken, addAccountByKey, removeAccount,
-  configureBindHost, emitNoAuthWarnings,
+  configureBindHost, emitNoAuthWarnings, getDroughtSummary,
 } from './auth.js';
 import { handleChatCompletions } from './handlers/chat.js';
 import { handleMessages } from './handlers/messages.js';
@@ -84,13 +84,18 @@ function json(res, status, body) {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    // Per-request dynamic responses must not be cached by intermediaries.
+    // Some upstream aggregators (e.g. sub2api, #97) priority-cache responses
+    // when they don't see an explicit Cache-Control directive and serve
+    // stale content for fresh requests.
+    'Cache-Control': 'no-store',
   });
   res.end(data);
 }
 
 async function route(req, res) {
   const { method } = req;
-  const path = req.url.split('?')[0];
+  let path = req.url.split('?')[0];
 
   if (method === 'OPTIONS') {
     res.writeHead(204, {
@@ -122,6 +127,10 @@ async function route(req, res) {
         body.conversationPool = poolStats();
         body.cache = cacheStats();
         body.lsPool = getLsStatus();
+        // v2.0.57 Fix 5 — drought summary so monitoring can page on
+        // "all accounts < 5% weekly" without screen-scraping per-account
+        // credit dumps.
+        body.drought = getDroughtSummary();
       } catch {}
     }
     return json(res, 200, body);
@@ -204,7 +213,15 @@ async function route(req, res) {
   // ─── API endpoints (require API key) ────────────────────
 
   if (!validateApiKey(extractToken(req))) {
-    return json(res, 401, { error: { message: 'Invalid API key', type: 'auth_error' } });
+    // v2.0.61 (#110): clearer error so operators know the issue is
+    // configuration (no API_KEY set on a public-bind instance) rather
+    // than a bad client header. The chat client side rarely shows a
+    // verbose error so we cram the diagnosis into the message itself.
+    const tokenSent = !!extractToken(req);
+    const message = tokenSent
+      ? 'Invalid API key. Either the key is wrong, or the server has API_KEY configured to a different value than the one your client sent.'
+      : 'Missing API key. This server runs in fail-closed mode: requests must include `Authorization: Bearer <key>` (or `x-api-key: <key>`) matching the configured API_KEY env var. If you intend to run open (no auth), bind the server to localhost (HOST=127.0.0.1).';
+    return json(res, 401, { error: { message, type: 'auth_error' } });
   }
 
   // ─── Auth management (admin — gated by API key above) ──
@@ -326,6 +343,13 @@ async function route(req, res) {
       json(res, result.status, result.body);
     }
     return;
+  }
+
+  // v2.0.71 (#121 keh4l): some clients send `/v1/response` (singular)
+  // by mistake — this exact alias avoids a confusing 404 and routes to
+  // the canonical handler. The plural `/v1/responses` is the spec form.
+  if (path === '/v1/response' && method === 'POST') {
+    path = '/v1/responses';
   }
 
   if (path === '/v1/responses' && method === 'POST') {

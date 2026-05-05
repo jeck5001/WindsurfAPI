@@ -11,9 +11,12 @@
 
 export const MODELS = {
   // ── Claude ──────────────────────────────────────────────
-  'claude-3.5-sonnet':              { name: 'claude-3.5-sonnet',              provider: 'anthropic', enumValue: 166, credit: 2 },
-  'claude-3.7-sonnet':              { name: 'claude-3.7-sonnet',              provider: 'anthropic', enumValue: 226, credit: 2 },
-  'claude-3.7-sonnet-thinking':     { name: 'claude-3.7-sonnet-thinking',     provider: 'anthropic', enumValue: 227, credit: 3 },
+  // Legacy 3.5 / 3.7 series — only have enumValue (legacy RawGetChatMessage flow), no modelUid.
+  // Cascade upstream returns "neither PlanModel nor RequestedModel specified" for all three;
+  // chat.js translates that to 410 model_deprecated when the catalog flag is set. issue #109.
+  'claude-3.5-sonnet':              { name: 'claude-3.5-sonnet',              provider: 'anthropic', enumValue: 166, credit: 2, deprecated: true },
+  'claude-3.7-sonnet':              { name: 'claude-3.7-sonnet',              provider: 'anthropic', enumValue: 226, credit: 2, deprecated: true },
+  'claude-3.7-sonnet-thinking':     { name: 'claude-3.7-sonnet-thinking',     provider: 'anthropic', enumValue: 227, credit: 3, deprecated: true },
   'claude-4-sonnet':                { name: 'claude-4-sonnet',                provider: 'anthropic', enumValue: 281, modelUid: 'MODEL_CLAUDE_4_SONNET', credit: 2 },
   'claude-4-sonnet-thinking':       { name: 'claude-4-sonnet-thinking',       provider: 'anthropic', enumValue: 282, modelUid: 'MODEL_CLAUDE_4_SONNET_THINKING', credit: 3 },
   'claude-4-opus':                  { name: 'claude-4-opus',                  provider: 'anthropic', enumValue: 290, modelUid: 'MODEL_CLAUDE_4_OPUS', credit: 4 },
@@ -41,6 +44,9 @@ export const MODELS = {
   'claude-opus-4-7-medium-thinking': { name: 'claude-opus-4-7-medium-thinking', provider: 'anthropic', enumValue: 0, modelUid: 'claude-opus-4-7-medium-thinking', credit: 10 },
   'claude-opus-4-7-high-thinking':  { name: 'claude-opus-4-7-high-thinking',  provider: 'anthropic', enumValue: 0,   modelUid: 'claude-opus-4-7-high-thinking', credit: 12 },
   'claude-opus-4-7-xhigh-thinking': { name: 'claude-opus-4-7-xhigh-thinking', provider: 'anthropic', enumValue: 0,   modelUid: 'claude-opus-4-7-xhigh-thinking', credit: 16 },
+  // `max` reasoning tier appeared in GetCascadeModelConfigs after the 4.7 launch — sits
+  // above xhigh in the effort ladder. No -thinking sibling in cloud catalog yet.
+  'claude-opus-4-7-max':            { name: 'claude-opus-4-7-max',            provider: 'anthropic', enumValue: 0,   modelUid: 'claude-opus-4-7-max', credit: 16 },
 
   // ── GPT ─────────────────────────────────────────────────
   'gpt-4o':                         { name: 'gpt-4o',                         provider: 'openai', enumValue: 109, modelUid: 'MODEL_CHAT_GPT_4O_2024_08_06', credit: 1 },
@@ -109,6 +115,29 @@ export const MODELS = {
   'gpt-5.4-mini-high':              { name: 'gpt-5.4-mini-high',              provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-4-mini-high', credit: 4.5 },
   'gpt-5.4-mini-xhigh':             { name: 'gpt-5.4-mini-xhigh',             provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-4-mini-xhigh', credit: 12 },
 
+  // GPT-5.5 — Windsurf catalog 2026-04-30. Same effort ladder as 5.2/5.4 (none/low/medium/high/xhigh)
+  // with priority (=fast) lane equivalents. Bare `gpt-5.5` defaults to medium.
+  'gpt-5.5':                        { name: 'gpt-5.5',                        provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-medium', credit: 2 },
+  'gpt-5.5-none':                   { name: 'gpt-5.5-none',                   provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-none', credit: 1 },
+  'gpt-5.5-low':                    { name: 'gpt-5.5-low',                    provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-low', credit: 1 },
+  'gpt-5.5-medium':                 { name: 'gpt-5.5-medium',                 provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-medium', credit: 2 },
+  'gpt-5.5-high':                   { name: 'gpt-5.5-high',                   provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-high', credit: 4 },
+  'gpt-5.5-xhigh':                  { name: 'gpt-5.5-xhigh',                  provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-xhigh', credit: 8 },
+  'gpt-5.5-none-fast':              { name: 'gpt-5.5-none-fast',              provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-none-priority', credit: 2 },
+  'gpt-5.5-low-fast':               { name: 'gpt-5.5-low-fast',               provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-low-priority', credit: 2 },
+  'gpt-5.5-medium-fast':            { name: 'gpt-5.5-medium-fast',            provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-medium-priority', credit: 4 },
+  'gpt-5.5-high-fast':              { name: 'gpt-5.5-high-fast',              provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-high-priority', credit: 8 },
+  'gpt-5.5-xhigh-fast':             { name: 'gpt-5.5-xhigh-fast',             provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-5-xhigh-priority', credit: 16 },
+
+  // GPT-5.3 Codex — already had bare `gpt-5.3-codex` (legacy alias), now expose tier variants.
+  'gpt-5.3-codex-low':              { name: 'gpt-5.3-codex-low',              provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-low', credit: 0.5 },
+  'gpt-5.3-codex-high':             { name: 'gpt-5.3-codex-high',             provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-high', credit: 2 },
+  'gpt-5.3-codex-xhigh':            { name: 'gpt-5.3-codex-xhigh',            provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-xhigh', credit: 4 },
+  'gpt-5.3-codex-low-fast':         { name: 'gpt-5.3-codex-low-fast',         provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-low-priority', credit: 1 },
+  'gpt-5.3-codex-medium-fast':      { name: 'gpt-5.3-codex-medium-fast',      provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-medium-priority', credit: 2 },
+  'gpt-5.3-codex-high-fast':        { name: 'gpt-5.3-codex-high-fast',        provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-high-priority', credit: 4 },
+  'gpt-5.3-codex-xhigh-fast':       { name: 'gpt-5.3-codex-xhigh-fast',       provider: 'openai', enumValue: 0,   modelUid: 'gpt-5-3-codex-xhigh-priority', credit: 6 },
+
   // GPT-OSS
   'gpt-oss-120b':                   { name: 'gpt-oss-120b',                   provider: 'openai', enumValue: 0,   modelUid: 'MODEL_GPT_OSS_120B', credit: 0.25 },
 
@@ -174,13 +203,14 @@ export const MODELS = {
   'swe-1.6-fast':                   { name: 'swe-1.6-fast',                   provider: 'windsurf', enumValue: 421, modelUid: 'MODEL_SWE_1_6_FAST', credit: 0.5 },
 
   // ── Adaptive (Windsurf 2026-04-06 changelog) ────────────
-  // Adaptive Model Router auto-picks model + reasoning tier per turn.
-  // No fixed credit — billing per actual underlying model used.
-  'adaptive':                       { name: 'adaptive',                       provider: 'windsurf', enumValue: 0,   modelUid: 'adaptive', credit: 1 },
-
-  // ── Arena ───────────────────────────────────────────────
-  'arena-fast':                     { name: 'arena-fast',                     provider: 'windsurf', enumValue: 0,   modelUid: 'arena-fast', credit: 0.5 },
-  'arena-smart':                    { name: 'arena-smart',                    provider: 'windsurf', enumValue: 0,   modelUid: 'arena-smart', credit: 1 },
+  // Adaptive Model Router + Arena models live in the cloud catalog but their
+  // UIDs aren't recognized by SendUserCascadeMessage's direct-call path —
+  // upstream returns "unknown model UID adaptive: model not found". They only
+  // work through the Windsurf IDE's special routing layer that Cascade-direct
+  // doesn't expose. Mark deprecated so they stop showing in /v1/models. #109.
+  'adaptive':                       { name: 'adaptive',                       provider: 'windsurf', enumValue: 0,   modelUid: 'adaptive', credit: 1, deprecated: true },
+  'arena-fast':                     { name: 'arena-fast',                     provider: 'windsurf', enumValue: 0,   modelUid: 'arena-fast', credit: 0.5, deprecated: true },
+  'arena-smart':                    { name: 'arena-smart',                    provider: 'windsurf', enumValue: 0,   modelUid: 'arena-smart', credit: 1, deprecated: true },
 };
 
 // Build reverse lookup
@@ -221,6 +251,42 @@ _lookup.set('gpt-5-4-mini-low', 'gpt-5.4-mini-low');
 _lookup.set('gpt-5-4-mini-medium', 'gpt-5.4-mini-medium');
 _lookup.set('gpt-5-4-mini-high', 'gpt-5.4-mini-high');
 _lookup.set('gpt-5-4-mini-xhigh', 'gpt-5.4-mini-xhigh');
+// Bare-tier aliases — clients commonly write the dotted form for the medium tier
+// even when the catalog uses bare-only or tier-only entries. Without these the
+// /v1/messages handler 400s "Unsupported model" before forwarding. #109 sub2api
+// reproducer was `gpt-5.2-medium` (bare gpt-5.2 = medium but the alias was missing).
+_lookup.set('gpt-5.2-medium', 'gpt-5.2');                  // bare gpt-5.2 IS the medium tier
+_lookup.set('gpt-5-2-medium', 'gpt-5.2');                  // cloud-format equivalent
+_lookup.set('gpt-5.2-codex', 'gpt-5.2-codex-medium');      // bare codex → medium
+_lookup.set('gpt-5-2-codex-medium', 'gpt-5.2-codex-medium');
+_lookup.set('gpt-5.3-codex-medium', 'gpt-5.3-codex');      // bare codex IS medium
+_lookup.set('gpt-5.4', 'gpt-5.4-medium');                  // bare → medium per family convention
+// gpt-5.5 cloud-format aliases (cloud sends `gpt-5-5-*`, OpenAI-style is `gpt-5.5-*`)
+_lookup.set('gpt-5-5', 'gpt-5.5');
+_lookup.set('gpt-5-5-none', 'gpt-5.5-none');
+_lookup.set('gpt-5-5-low', 'gpt-5.5-low');
+_lookup.set('gpt-5-5-medium', 'gpt-5.5-medium');
+_lookup.set('gpt-5-5-high', 'gpt-5.5-high');
+_lookup.set('gpt-5-5-xhigh', 'gpt-5.5-xhigh');
+_lookup.set('gpt-5-5-none-priority', 'gpt-5.5-none-fast');
+_lookup.set('gpt-5-5-low-priority', 'gpt-5.5-low-fast');
+_lookup.set('gpt-5-5-medium-priority', 'gpt-5.5-medium-fast');
+_lookup.set('gpt-5-5-high-priority', 'gpt-5.5-high-fast');
+_lookup.set('gpt-5-5-xhigh-priority', 'gpt-5.5-xhigh-fast');
+// gpt-5.3-codex tier aliases
+_lookup.set('gpt-5-3-codex-low', 'gpt-5.3-codex-low');
+_lookup.set('gpt-5-3-codex-medium', 'gpt-5.3-codex');
+_lookup.set('gpt-5-3-codex-high', 'gpt-5.3-codex-high');
+_lookup.set('gpt-5-3-codex-xhigh', 'gpt-5.3-codex-xhigh');
+_lookup.set('gpt-5-3-codex-low-priority', 'gpt-5.3-codex-low-fast');
+_lookup.set('gpt-5-3-codex-medium-priority', 'gpt-5.3-codex-medium-fast');
+_lookup.set('gpt-5-3-codex-high-priority', 'gpt-5.3-codex-high-fast');
+_lookup.set('gpt-5-3-codex-xhigh-priority', 'gpt-5.3-codex-xhigh-fast');
+// Cloud-format aliases for existing dotted names
+_lookup.set('swe-1-6', 'swe-1.6');
+_lookup.set('swe-1-6-fast', 'swe-1.6-fast');
+_lookup.set('minimax-m2-5', 'minimax-m2.5');
+_lookup.set('kimi-k2-5', 'kimi-k2.5');
 
 // Anthropic official dated names — Cursor / Claude Code / Anthropic SDK
 // all send these verbatim. Map each to our short key so the same client
@@ -239,8 +305,36 @@ const ANTHROPIC_DATED = {
   'claude-opus-4-1-20250805':   'claude-4.1-opus',
   'claude-sonnet-4-5':          'claude-4.5-sonnet',
   'claude-sonnet-4-5-20250929': 'claude-4.5-sonnet',
+  'claude-sonnet-4-5-latest':   'claude-4.5-sonnet',
   'claude-opus-4-5':            'claude-4.5-opus',
   'claude-opus-4-5-20251101':   'claude-4.5-opus',
+  'claude-opus-4-5-latest':     'claude-4.5-opus',
+  // Claude Haiku 4.5 — Anthropic official id `claude-haiku-4-5-20251001`
+  // (#117 xiaoxin-zk: dashboard test sent the dated form, hit
+  // "Unsupported model" 400 because no alias existed). Cover the dated
+  // name + bare + latest the same way sonnet/opus already are.
+  'claude-haiku-4-5':           'claude-4.5-haiku',
+  'claude-haiku-4-5-20251001':  'claude-4.5-haiku',
+  'claude-haiku-4-5-latest':    'claude-4.5-haiku',
+  // v2.0.85: README + every recent reply uses the dotted form
+  // `claude-haiku-4.5` (mirrors `claude-sonnet-4.6`). Alias both
+  // dotted and dashed so users following the docs verbatim don't hit
+  // 400 model_not_found.
+  'claude-haiku-4.5':           'claude-4.5-haiku',
+  'claude-haiku-4.5-latest':    'claude-4.5-haiku',
+  // Sonnet 4.5 dotted-suffix variants for the same reason.
+  'claude-sonnet-4.5':          'claude-4.5-sonnet',
+  'claude-sonnet-4.5-thinking': 'claude-4.5-sonnet-thinking',
+  'claude-opus-4.5':            'claude-4.5-opus',
+  'claude-opus-4.5-thinking':   'claude-4.5-opus-thinking',
+  // Legacy Haiku dated names — Anthropic SDK clients sometimes still
+  // ship these. Map to the closest live model (4.5-haiku) so the request
+  // doesn't 400; the `deprecated` flag isn't set on 4.5-haiku so it
+  // routes normally.
+  'claude-3-5-haiku-20241022':  'claude-4.5-haiku',
+  'claude-3-5-haiku-latest':    'claude-4.5-haiku',
+  'claude-haiku-3-5':           'claude-4.5-haiku',
+  'claude-haiku-3-5-latest':    'claude-4.5-haiku',
 
   // Anthropic Opus 4.7 — Windsurf changelog 2026-04-16. Cloud now exposes 4 reasoning
   // tiers (low/medium/high/xhigh) plus matching -thinking variants. Bare `claude-opus-4-7`
@@ -257,6 +351,7 @@ const ANTHROPIC_DATED = {
   'claude-opus-4.7-medium-thinking': 'claude-opus-4-7-medium-thinking',
   'claude-opus-4.7-high-thinking':   'claude-opus-4-7-high-thinking',
   'claude-opus-4.7-xhigh-thinking':  'claude-opus-4-7-xhigh-thinking',
+  'claude-opus-4.7-max':             'claude-opus-4-7-max',
 };
 for (const [k, v] of Object.entries(ANTHROPIC_DATED)) _lookup.set(k, v);
 
@@ -271,6 +366,9 @@ const OPENAI_DATED = {
   'gpt-4.1-nano-2025-04-14': 'gpt-4.1-nano',
   'gpt-5-2025-08-07': 'gpt-5',
   'gpt-5-pro-2025-10-06': 'gpt-5-high',
+  // GPT-5.5 — bare aliases default to medium tier (matches gpt-5.2 / gpt-5.4 pattern).
+  'gpt-5-5':    'gpt-5.5-medium',
+  'gpt-5.5':    'gpt-5.5-medium',
 };
 for (const [k, v] of Object.entries(OPENAI_DATED)) _lookup.set(k, v);
 
@@ -319,6 +417,88 @@ export function getModelInfo(id) {
   return MODELS[id] || null;
 }
 
+// v2.0.84 (#118 0a00) — when an entire account pool is rate-limited
+// on a high-effort variant (`-max` / `-xhigh` / `-thinking-1m`), find
+// a same-base lower-effort variant the user could fall back to. Used
+// for two purposes:
+//   1. Error remediation: include the suggested model in the 429
+//      response so the client can switch transparently.
+//   2. Optional auto-fallback (env opt-in): proxy retries the same
+//      request against the lower variant before reporting failure.
+//
+// Returns null when no lower variant exists in the catalog. Effort
+// ladder is suffix-only — we don't infer ladders, we read them off
+// the literal model-key suffix.
+//
+// Suffix order: less expensive first → more expensive last.
+const EFFORT_LADDER = [
+  // Anthropic effort tiers
+  'low', 'medium', 'high', 'xhigh', 'max',
+  // GPT codex max sub-tiers (claude has -low, -medium, -high; gpt
+  // codex has -low / -medium / -high stacked under -max-)
+];
+const CONTEXT_LADDER = ['1m']; // 1m context variants are weekly-quota'd
+
+// v2.0.89 (audit follow-up to v2.0.88 H-1.5): cascade pool alias
+// fingerprint relies on `toolPreamble` being IDENTICAL between the
+// stored fpAfterAlias and the next-turn fpBefore. toolPreamble depends
+// on the dialect picked for (modelKey, provider, route). Inside one
+// provider the dialect normally stays the same, so the alias slot
+// fingerprint matches the next-turn lookup. But a cross-provider
+// fallback (e.g. anthropic claude-opus → openai gpt-5.5) would build
+// the alias slot with the gpt_native dialect's toolPreamble while the
+// next turn rebuilds with claude's dialect → silent fingerprint
+// mismatch → cascade reuse miss → model "forgets" prior turns again,
+// regressing the v2.0.87 fix that the v2.0.88 alias write was meant
+// to enforce.
+//
+// Today the EFFORT_LADDER and CONTEXT_LADDER walk only ever stays
+// inside the same base model name (claude-opus-4-7-* siblings are all
+// anthropic; codex max-* are all openai). But this is fragile —
+// future catalog edits could produce a cross-provider candidate by
+// accident. Add a hard guard: only return a fallback that has the
+// same `provider` as the original.
+function _isSameProviderFallback(originalKey, candidateKey) {
+  const o = MODELS[originalKey];
+  const c = MODELS[candidateKey];
+  if (!o || !c) return false;
+  // No provider on either side → conservatively allow (matches old
+  // behaviour for entries that haven't been catalogued with provider
+  // metadata, though all current entries do have provider).
+  if (!o.provider || !c.provider) return true;
+  return o.provider === c.provider;
+}
+
+export function pickRateLimitFallback(modelKey) {
+  if (!modelKey || typeof modelKey !== 'string') return null;
+  // Try effort suffix first (e.g. -max → -xhigh → -high → -medium → -low)
+  for (let i = EFFORT_LADDER.length - 1; i >= 1; i--) {
+    const suffix = `-${EFFORT_LADDER[i]}`;
+    if (modelKey.endsWith(suffix)) {
+      const base = modelKey.slice(0, -suffix.length);
+      // Walk DOWN the ladder until we find a key actually in the catalog
+      // AND from the same provider (cascade pool alias requires same
+      // dialect → same toolPreamble → same fingerprint).
+      for (let j = i - 1; j >= 0; j--) {
+        const candidate = `${base}-${EFFORT_LADDER[j]}`;
+        if (MODELS[candidate] && _isSameProviderFallback(modelKey, candidate)) return candidate;
+      }
+    }
+  }
+  // 1m context variants → drop -1m
+  for (const suffix of CONTEXT_LADDER) {
+    const dashed = `-${suffix}`;
+    if (modelKey.endsWith(dashed)) {
+      const candidate = modelKey.slice(0, -dashed.length);
+      if (MODELS[candidate] && _isSameProviderFallback(modelKey, candidate)) return candidate;
+    }
+  }
+  // -thinking variants don't have a simple ladder; the natural fallback
+  // is the non-thinking sibling, but that changes user-visible behaviour
+  // (no reasoning content). Skip auto-fallback for those.
+  return null;
+}
+
 // Reverse map: Model enum number → list of catalog keys (enum may match
 // multiple variants if we ever dupe, but typically 1:1).
 const _enumToKeys = (() => {
@@ -350,7 +530,16 @@ export function registerDiscoveredFreeModel(key) {
 export const MODEL_TIER_ACCESS = {
   get pro() { return Object.keys(MODELS); },
   get free() { return [...FREE_TIER_BASE, ..._discoveredFreeModels]; },
-  get unknown() { return [...FREE_TIER_BASE, ..._discoveredFreeModels]; },
+  // Optimistic: a freshly-added account whose probe hasn't completed yet
+  // gets the FULL pro catalog, not just gemini-2.5-flash. Otherwise the
+  // chat.js anyEligible check (line ~1141) immediately 403s any non-free
+  // model with "模型 X 在当前账号池中不可用", and users see "添加账号后
+  // 不能调用任何模型" until probe finishes ~10-30s later. Trade-off: a
+  // free user may try opus before probe completes; the request will fail
+  // upstream with a real entitlement error from the LS, which is a more
+  // accurate failure than the misleading "model not in account pool" we
+  // were emitting. Reported in QQ group, 2026-04-30.
+  get unknown() { return Object.keys(MODELS); },
   expired: [],
 };
 

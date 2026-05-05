@@ -1741,6 +1741,14 @@ window._firebaseOAuth = async function(provider) {
 
     <div id="ls-pool-card"></div>
 
+    <!-- v2.0.57 Fix 5 — drought mode banner. Hidden until loadDrought()
+         flips it. Hand-drawn warning frame to fit the sketch theme. -->
+    <div id="drought-banner" style="display:none;margin:10px 0 16px;padding:14px 18px;border:1.5px dashed #d97706;background:#fff7e6;border-radius:8px;color:#874d00">
+      <strong data-zh="配额预警 ·" data-en="Quota drought ·">配额预警 ·</strong>
+      <span id="drought-message" data-zh="所有账号本周配额都低于阈值，建议补账号或等待重置" data-en="every account's weekly quota is under the threshold; add accounts or wait for reset">所有账号本周配额都低于阈值，建议补账号或等待重置</span>
+      <span id="drought-detail" class="text-mute" style="margin-left:8px;font-size:12px"></span>
+    </div>
+
     <div class="section">
       <div class="section-head">
         <div><div class="section-title"><span class="num">+</span><span data-zh="添加账号" data-en="Add an account">添加账号</span></div>
@@ -1927,6 +1935,14 @@ window._firebaseOAuth = async function(provider) {
             <div class="text-sm text-mute" data-zh="默认关闭。开启后立即生效。" data-en="Off by default. Takes effect immediately.">默认关闭。开启后立即生效。</div>
           </div>
         </div>
+        <!-- v2.0.58 — drought-mode premium gate toggle -->
+        <div style="display:flex;align-items:center;gap:14px;margin-bottom:18px;padding-top:14px;border-top:1px dashed var(--rule-faint)">
+          <label class="switch"><input type="checkbox" id="exp-drought-restrict" onchange="App.toggleExperimental('droughtRestrictPremium', this.checked)"><span class="switch-slider"></span></label>
+          <div>
+            <div style="font-weight:500" data-zh="drought 时屏蔽 premium 模型" data-en="Block premium models during drought">drought 时屏蔽 premium 模型</div>
+            <div class="text-sm text-mute" data-zh="所有账号本周配额都 < 5% 时对 premium 模型请求返 503，避免烧最后配额。免费层模型（gemini-2.5-flash 等）保持可用。" data-en="Refuse premium models with 503 when every account is below 5% weekly so the last quota isn't burned on a 429. Free-tier models still go through.">所有账号本周配额都 < 5% 时对 premium 模型请求返 503，避免烧最后配额。</div>
+          </div>
+        </div>
         <div class="metrics-grid" id="exp-pool-cards" style="margin:0;border:1.5px solid var(--rule-faint)"></div>
         <div class="field-row-actions">
           <button class="btn btn-ghost btn-sm" onclick="App.clearConversationPool()">clear pool</button>
@@ -1944,6 +1960,44 @@ window._firebaseOAuth = async function(provider) {
       </div>
       <div class="frame">
         <div id="system-prompts-editor" style="display:grid;gap:14px"></div>
+      </div>
+    </div>
+
+    <div class="section" style="margin-top:24px">
+      <div class="section-head">
+        <div>
+          <div class="section-title"><span class="num">~</span><span data-zh="凭证管理" data-en="Credentials">凭证管理</span></div>
+          <div class="section-desc" data-zh="运行时改 API_KEY 和 Dashboard 密码，写入 runtime-config.json 立即生效，不重启容器。改完之后下一次请求要用新值。" data-en="Rotate API_KEY and dashboard password from this panel; persisted to runtime-config.json. New value takes effect on the next request.">运行时改 API_KEY 和 Dashboard 密码，写入 runtime-config.json 立即生效，不重启容器。改完之后下一次请求要用新值。</div>
+        </div>
+      </div>
+      <div class="frame" style="display:grid;gap:14px">
+        <div style="display:grid;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong>API_KEY</strong>
+            <span class="text-mute" id="credentials-apikey-source"></span>
+            <span style="font-family:monospace" id="credentials-apikey-masked"></span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="password" class="input" id="credentials-apikey-input" placeholder="新 API_KEY（≥ 8 字符；留空清除运行时覆盖）" style="flex:1;min-width:240px">
+            <button class="btn btn-ghost btn-sm" onclick="App.toggleApiKeyVisibility()" data-zh="显隐" data-en="show/hide">显隐</button>
+            <button class="btn btn-sm" onclick="App.saveCredential('apiKey')" data-zh="保存" data-en="save">保存</button>
+          </div>
+          <div class="text-sm text-mute" data-zh="改完之后所有 chat 客户端要换成新 KEY；旧 KEY 立即失效。" data-en="All chat clients must use the new KEY after save; the old KEY stops working immediately.">改完之后所有 chat 客户端要换成新 KEY；旧 KEY 立即失效。</div>
+        </div>
+        <div style="display:grid;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong data-zh="Dashboard 密码" data-en="Dashboard password">Dashboard 密码</strong>
+            <span class="text-mute" id="credentials-dashboardpw-source"></span>
+            <span id="credentials-dashboardpw-status"></span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="password" class="input" id="credentials-dashboardpw-input" placeholder="新 Dashboard 密码（≥ 8 字符；留空清除运行时覆盖）" style="flex:1;min-width:240px">
+            <button class="btn btn-ghost btn-sm" onclick="App.toggleDashboardPwVisibility()" data-zh="显隐" data-en="show/hide">显隐</button>
+            <button class="btn btn-sm" onclick="App.saveCredential('dashboardPassword')" data-zh="保存" data-en="save">保存</button>
+          </div>
+          <div class="text-sm text-mute" data-zh="scrypt 派生哈希存盘；改完会自动登出，需用新密码重登。" data-en="scrypt-derived; you'll be signed out and need to re-login with the new password.">scrypt 派生哈希存盘；改完会自动登出，需用新密码重登。</div>
+        </div>
+        <div class="text-sm text-mute" data-zh="同一 IP 连续 5 次 dashboard 登录失败会被锁 30 分钟（v2.0.56 起）。" data-en="Same IP gets locked for 30 minutes after 5 failed dashboard logins (since v2.0.56).">同一 IP 连续 5 次 dashboard 登录失败会被锁 30 分钟（v2.0.56 起）。</div>
       </div>
     </div>
 
@@ -2629,7 +2683,29 @@ const App = {
     return this._modelsCatalog;
   },
 
+  async loadDrought() {
+    const banner = document.getElementById('drought-banner');
+    const detail = document.getElementById('drought-detail');
+    if (!banner) return;
+    try {
+      const d = await this.api('GET', '/drought');
+      if (!d?.drought) { banner.style.display = 'none'; return; }
+      banner.style.display = '';
+      if (detail) {
+        const lw = d.lowestWeeklyPercent;
+        const ld = d.lowestDailyPercent;
+        const parts = [];
+        if (lw != null) parts.push(`min weekly=${lw.toFixed(0)}%`);
+        if (ld != null) parts.push(`min daily=${ld.toFixed(0)}%`);
+        parts.push(`${d.knownAccounts}/${d.activeAccounts} accounts known`);
+        detail.textContent = parts.join(' · ');
+      }
+    } catch { banner.style.display = 'none'; }
+  },
+
   async loadAccounts() {
+    // v2.0.57 Fix 5: refresh drought banner alongside accounts.
+    this.loadDrought();
     const [d, ov] = await Promise.all([
       this.api('GET', '/accounts'),
       this.api('GET', '/overview').catch(() => null),
@@ -2679,10 +2755,15 @@ const App = {
         const planName = cr.planName || '-';
         const fetchedAgo = cr.fetchedAt ? Math.round((Date.now() - cr.fetchedAt) / 60000) + 'm' : '-';
         const renderBar = (lbl, pct) => {
-          if (pct == null) return `<div class="detail-bar" style="margin:0;grid-template-columns:18px 1fr 32px"><span class="b-label">${lbl}</span><div class="bar" style="height:5px;border-width:1px"><div class="bar-fill"></div></div><span class="b-pct text-dim">—</span></div>`;
+          // v2.0.75 (#123): "N/A" reads more clearly than an em-dash
+          // when upstream just doesn't return that bucket (Trial Daily
+          // is null but Weekly has a value — easy to mistake for a
+          // refresh failure). italic + dashed border separates it
+          // visually from a 0% / failure state.
+          if (pct == null) return `<div class="detail-bar" style="margin:0;grid-template-columns:18px 1fr 36px" title="upstream returned no data for this bucket"><span class="b-label">${lbl}</span><div class="bar" style="height:5px;border-width:1px;border-style:dashed"><div class="bar-fill"></div></div><span class="b-pct text-dim italic">N/A</span></div>`;
           const v = Math.max(0, Math.min(100, pct));
           const k = v <= 10 ? 'error' : v <= 30 ? 'warn' : 'good';
-          return `<div class="detail-bar" style="margin:0;grid-template-columns:18px 1fr 32px"><span class="b-label">${lbl}</span><div class="bar" style="height:5px;border-width:1px"><div class="bar-fill ${k}" style="width:${v}%"></div></div><span class="b-pct">${v.toFixed(0)}%</span></div>`;
+          return `<div class="detail-bar" style="margin:0;grid-template-columns:18px 1fr 36px"><span class="b-label">${lbl}</span><div class="bar" style="height:5px;border-width:1px"><div class="bar-fill ${k}" style="width:${v}%"></div></div><span class="b-pct">${v.toFixed(0)}%</span></div>`;
         };
         creditCell = `<div style="min-width:130px"><div class="text-xs" style="margin-bottom:3px"><b>${this.esc(planName.slice(0,12))}</b> <span class="text-mute">${fetchedAgo}</span></div>${renderBar('D', cr.dailyPercent)}${renderBar('W', cr.weeklyPercent)}</div>`;
       }
@@ -3249,6 +3330,8 @@ const App = {
      for clearing. The original sketch wired PATCH and POST /clear-pool which
      returned 404, so toggles silently reverted on next load. */
   async loadExperimental() {
+    // v2.0.56: refresh credentials snapshot when the panel opens.
+    this.loadCredentials();
     const r = await this.api('GET', '/experimental');
     const flag = r.flags?.cascadeConversationReuse ?? r.cascadeConversationReuse;
     const cb = document.getElementById('exp-cascade-reuse');
@@ -3271,6 +3354,52 @@ const App = {
     // the production UI. Render is best-effort: if /system-prompts is gone
     // (older backend) just hide the section silently.
     await this.loadSystemPrompts();
+  },
+
+  /* ── credentials (v2.0.56) — runtime-rotatable API_KEY + dashboard pw */
+  async loadCredentials() {
+    try {
+      const d = await this.api('GET', '/settings/credentials');
+      const ks = document.getElementById('credentials-apikey-source');
+      const km = document.getElementById('credentials-apikey-masked');
+      const ds = document.getElementById('credentials-dashboardpw-source');
+      const dst = document.getElementById('credentials-dashboardpw-status');
+      if (ks) ks.textContent = '[' + (d.apiKeySource || 'unset') + ']';
+      if (km) km.textContent = d.apiKey_masked || '(unset)';
+      if (ds) ds.textContent = '[' + (d.dashboardPasswordSource || 'unset') + ']';
+      if (dst) dst.textContent = d.dashboardPasswordSet ? '已设置' : '未设置';
+    } catch (e) { /* panel not mounted yet */ }
+  },
+  toggleApiKeyVisibility() {
+    const el = document.getElementById('credentials-apikey-input');
+    if (el) el.type = el.type === 'password' ? 'text' : 'password';
+  },
+  toggleDashboardPwVisibility() {
+    const el = document.getElementById('credentials-dashboardpw-input');
+    if (el) el.type = el.type === 'password' ? 'text' : 'password';
+  },
+  async saveCredential(field) {
+    const inputId = field === 'apiKey' ? 'credentials-apikey-input' : 'credentials-dashboardpw-input';
+    const el = document.getElementById(inputId);
+    if (!el) return;
+    const value = el.value;
+    const cleared = value === '';
+    const label = field === 'apiKey' ? 'API_KEY' : 'Dashboard 密码';
+    const okConfirm = confirm(`${label}: ${cleared ? '清除运行时覆盖，回退 .env 值？' : '改完旧值立即失效，要继续吗？'}`);
+    if (!okConfirm) return;
+    try {
+      const r = await this.api('PUT', '/settings/credentials', { [field]: value });
+      el.value = '';
+      this.toast(r.success ? 'saved' : '保存失败');
+      if (field === 'dashboardPassword' && !cleared) {
+        sessionStorage.removeItem('dashboard_password');
+        setTimeout(() => location.reload(), 800);
+        return;
+      }
+      this.loadCredentials();
+    } catch (e) {
+      this.toast('保存失败: ' + (e.message || ''));
+    }
   },
   async toggleExperimental(key, val) {
     await this.api('PUT', '/experimental', { [key]: val });

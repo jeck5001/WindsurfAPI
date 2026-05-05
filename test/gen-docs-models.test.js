@@ -94,7 +94,11 @@ describe('scripts/gen-docs-models.js', () => {
       assert.equal(typeof html, 'string');
       assert.ok(models.length >= 100, `expected at least 100 models, got ${models.length}`);
       assert.ok(models.every(model => model?.k && model?.p && typeof model.c === 'number'));
-      assert.ok(models.some(model => model.k === 'adaptive'));
+      // Pick a stable, non-deprecated marker. `adaptive` was removed from
+      // /v1/models in v2.0.51 (#109) — upstream rejects its UID — so it
+      // can't be used as a presence anchor. claude-sonnet-4.6 is the
+      // current default and is unlikely to be deprecated near-term.
+      assert.ok(models.some(model => model.k === 'claude-sonnet-4.6'));
     } finally {
       rmSync(workspace, { recursive: true, force: true });
     }

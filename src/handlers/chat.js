@@ -5,11 +5,13 @@
 
 import { createHash, randomUUID } from 'crypto';
 import { WindsurfClient, contentToString, isCascadeTransportError } from '../client.js';
-import { getApiKey, acquireAccountByKey, releaseAccount, getAccountAvailability, reportError, reportSuccess, markRateLimited, reportInternalError, updateCapability, getAccountList, isAllRateLimited, isAllTemporarilyUnavailable, refundReservation } from '../auth.js';
-import { resolveModel, getModelInfo } from '../models.js';
+import { getApiKey, acquireAccountByKey, releaseAccount, getAccountAvailability, reportError, reportSuccess, markRateLimited, reportInternalError, updateCapability, getAccountList, isAllRateLimited, isAllTemporarilyUnavailable, refundReservation, looksLikeBanSignal, reportBanSignal, clearBanSignals, isModelBlockedByDrought, getDroughtSummary } from '../auth.js';
+import { resolveModel, getModelInfo, pickRateLimitFallback } from '../models.js';
 import { getLsFor, ensureLs } from '../langserver.js';
 import { config, log } from '../config.js';
-import { recordRequest } from '../dashboard/stats.js';
+import { recordRequest, recordTokenUsage, recordPolicyBlocked, recordRateLimited } from '../dashboard/stats.js';
+import { extractIntentFromNarrative, detectToolIntentInNarrative } from './intent-extractor.js';
+import { markRequest as markQuietWindowRequest } from '../dashboard/quiet-window-updater.js';
 import { isModelAllowed } from '../dashboard/model-access.js';
 import { cacheKey, cacheGet, cacheSet } from '../cache.js';
 import { isExperimentalEnabled } from '../runtime-config.js';
@@ -23,6 +25,10 @@ import {
   buildToolPreambleForProto, buildCompactToolPreambleForProto,
   buildSchemaCompactToolPreambleForProto, buildSkinnyToolPreambleForProto,
 } from './tool-emulation.js';
+import {
+  shouldUseNativeBridge, canMapAllTools, partitionTools, buildReverseLookup,
+  buildAdditionalStepsFromHistory, TOOL_MAP,
+} from '../cascade-native-bridge.js';
 import { sanitizeText, sanitizeToolCall, PathSanitizeStream } from '../sanitize.js';
 import { registerSseController } from '../sse-registry.js';
 
@@ -92,6 +98,48 @@ function shortHash(text) {
   return createHash('sha256').update(String(text || '')).digest('hex').slice(0, 16);
 }
 
+// v2.0.55 (audit M2): salvage parser will accept any
+// `{"name":"X","arguments":{...}}` JSON it finds in model output. If a user
+// message contains a prompt-injection payload (and a non-Claude model
+// faithfully echoes it), the parser would emit a tool_call for a name the
+// caller never declared — e.g. `Bash` when the request only offered
+// `get_weather`. Filter every emitted call against the request-declared
+// tools[] before handing it to the client.
+//
+// Empty tools[] (caller never offered any) → caller is requesting tool
+// emulation but didn't declare a list; treat it as "no tools allowed" so
+// rogue parser output never reaches the client. Callers using
+// `tool_choice:'none'` already get filtered upstream.
+export function filterToolCallsByAllowlist(toolCalls, tools) {
+  if (!Array.isArray(toolCalls) || !toolCalls.length) return toolCalls || [];
+  const allowed = new Set();
+  if (Array.isArray(tools)) {
+    for (const t of tools) {
+      const name = t?.function?.name || t?.name;
+      if (typeof name === 'string' && name) allowed.add(name);
+    }
+  }
+  if (!allowed.size) {
+    // No declared tools but the parser emitted tool_calls — drop them all.
+    // Surface once in logs so operators can spot prompt-injection attempts.
+    const seenNames = [...new Set(toolCalls.map(tc => tc?.name).filter(Boolean))];
+    if (seenNames.length) {
+      log.warn(`ToolGuard: dropping ${toolCalls.length} tool_call(s) — request had no tools[] declared (names="${seenNames.join(',')}")`);
+    }
+    return [];
+  }
+  const filtered = [];
+  const dropped = [];
+  for (const tc of toolCalls) {
+    if (tc?.name && allowed.has(tc.name)) filtered.push(tc);
+    else if (tc?.name) dropped.push(tc.name);
+  }
+  if (dropped.length) {
+    log.warn(`ToolGuard: dropping ${dropped.length} tool_call(s) not in declared tools[] (names="${[...new Set(dropped)].join(',')}", allowed="${[...allowed].join(',')}")`);
+  }
+  return filtered;
+}
+
 export function redactRequestLogText(text) {
   return String(text || '')
     .replace(/sk-[A-Za-z0-9_-]{20,}/g, 'sk-***')
@@ -112,6 +160,62 @@ function requestLogSummary(text, limit = 220) {
 
 export function chatStreamError(message, type = 'upstream_error', code = null) {
   return { error: { message: sanitizeText(message || 'Upstream stream error'), type, code } };
+}
+
+/**
+ * v2.0.71 (#115 server-side fabricate detection): when a tool-emulation
+ * request comes back with `markers=none` AND the model output looks like
+ * a fabricated tool-call result (epoch timestamp / file path stub /
+ * "PROBE_xxx_" pattern), surface a structured error to the caller
+ * instead of forwarding the hallucinated text. The model didn't call
+ * the function — handing the fake "result" back as if it were real
+ * silently corrupts agent loops (codex thinks the shell ran, schedules
+ * the next step on a phantom output).
+ *
+ * The heuristic is intentionally conservative: only triggers when ALL
+ * conditions hold:
+ *   1. A tool_call was clearly expected (caller asked for it via the
+ *      user prompt, or shell-style verbs are present)
+ *   2. Model output is short (≤ 240 chars) and contains no narrative
+ *   3. Output matches a known fabrication pattern (epoch ts, bare hash,
+ *      timestamp-suffixed token, or "I'd run X and get Y" guess)
+ *
+ * Returns a non-null { reason, hint } when the response looks fabricated.
+ */
+export function detectFabricatedToolResult(text, { lastUserText = '' } = {}) {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed || trimmed.length > 240) return null;
+  // Pure epoch / timestamp-only output (e.g. "1777751588" or
+  // "PROBE_V0270_1777751588" from real probes seen in the wild).
+  // Also catches `2026-05-02T19:53:08Z` style ISO ts the model writes
+  // when it thinks it just ran `date`.
+  const fabricatedPatterns = [
+    /^\d{10,13}$/,                         // bare epoch
+    /[A-Z][A-Z0-9_]{3,}_\d{10,}$/,         // PROBE_X_<epoch>
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,// ISO timestamp
+    /^[a-f0-9]{32,64}$/i,                  // bare hex hash
+    /^total \d+\s/im,                      // ls -la fake output
+    /^drwx[r-][w-][x-]/m,                  // ls -la directory line
+  ];
+  let matched = null;
+  for (const re of fabricatedPatterns) {
+    if (re.test(trimmed)) { matched = re.source; break; }
+  }
+  if (!matched) return null;
+  // Require the user prompt to have clearly asked for an action — random
+  // chat ("hi", "thanks") that happens to make the model output a number
+  // shouldn't trip this. Look for shell-style verbs in the most recent
+  // user turn.
+  const askedForAction = /\b(?:run|exec|execute|cat|ls|echo|grep|find|read|search|list|invoke|call)\b/i.test(lastUserText)
+    || /\bshell|bash|command|tool|function/i.test(lastUserText);
+  if (!askedForAction) return null;
+  return {
+    reason: 'fabricated_tool_result',
+    hint: 'The model returned text that pattern-matches a fabricated tool output (the model did NOT actually call the tool). This typically happens when GPT family runs through cascade emulation — Claude family handles tool calls more reliably. Try `--model claude-sonnet-4.6` or `claude-haiku-4.5`.',
+    matchedPattern: matched,
+    sample: trimmed.slice(0, 120),
+  };
 }
 
 /**
@@ -179,7 +283,7 @@ function textFromMessageContent(content) {
 
 export function extractRequestedJsonKeys(messages) {
   if (!Array.isArray(messages)) return [];
-  const text = latestRealUserText(messages)?.split('\n\n[You MUST respond with valid JSON only.')[0] || '';
+  const text = latestRealUserText(messages) || '';
   if (!text) return [];
   const match = text.match(/\b(?:exact\s+)?keys\s+([A-Za-z_$][\w$-]*(?:\s*,\s*[A-Za-z_$][\w$-]*)*(?:\s+(?:and|&)\s+(?!no\b)[A-Za-z_$][\w$-]*)?)/i);
   if (!match) return [];
@@ -211,12 +315,6 @@ export function isExplicitJsonRequested(messages) {
   if (/\bJSON\s+(?:object|only|format)\b/i.test(text)) return true;
   if (/\b(?:answer|respond|return|output)\s+only\s+(?:with\s+)?(?:valid\s+)?JSON\b/i.test(text)) return true;
   return false;
-}
-
-function appendJsonHintToContent(content, hint) {
-  if (typeof content === 'string') return content + hint;
-  if (Array.isArray(content)) return [...content, { type: 'text', text: hint }];
-  return content;
 }
 
 function plainObject(v) {
@@ -330,22 +428,21 @@ export function stabilizeJsonPayload(text, messages) {
 }
 
 export function applyJsonResponseHint(messages, responseFormat) {
-  let jsonHint = '\n\n[You MUST respond with valid JSON only. No markdown code fences, no explanation text, no prefix/suffix. Your entire response must be a single parseable JSON object. Preserve the exact JSON field names requested by the user, and do not add extra fields when an exact key set is requested. If tool results contain the requested values, put only those values into JSON fields rather than describing them in prose or copying the full tool result.';
+  // Inject ONLY a system message. Earlier versions also appended a long
+  // "[You MUST respond with valid JSON only ...]" suffix to the latest
+  // user turn's content, but that bled into the cascade reuse trajectory
+  // upstream — every follow-up turn on the same conversation inherited
+  // the JSON-only instruction even when the new turn never asked for
+  // JSON, producing things like `{"reply":"你好"}` for a plain greeting
+  // (#104). The system message is more authoritative for cascade routing
+  // anyway, and is regenerated per request rather than persisted in the
+  // conversation history, so it gets the work done without contaminating
+  // the trajectory.
+  let sysContent = 'Respond with valid JSON only. No markdown, no code fences, no explanation. Output must be parseable by JSON.parse(). Preserve the exact JSON field names requested by the user, and do not add extra fields when an exact key set is requested. If tool results contain the requested values, put only those values into JSON fields rather than describing them in prose or copying the full tool result.';
   if (responseFormat?.type === 'json_schema' && responseFormat?.json_schema?.schema) {
-    jsonHint += ' Conform to this JSON Schema:\n' + JSON.stringify(responseFormat.json_schema.schema);
+    sysContent += ' Conform to this JSON Schema:\n' + JSON.stringify(responseFormat.json_schema.schema);
   }
-  jsonHint += ']';
-
-  const sysJsonMsg = { role: 'system', content: 'Respond with valid JSON only. No markdown, no code fences, no explanation. Output must be parseable by JSON.parse().' };
-  const out = [sysJsonMsg, ...(Array.isArray(messages) ? messages : [])];
-  for (let i = out.length - 1; i >= 1; i--) {
-    if (out[i]?.role !== 'user') continue;
-    const text = textFromMessageContent(out[i].content);
-    if (/^\s*<tool_result\b/i.test(text)) continue;
-    out[i] = { ...out[i], content: appendJsonHintToContent(out[i].content, jsonHint) };
-    break;
-  }
-  return out;
+  return [{ role: 'system', content: sysContent }, ...(Array.isArray(messages) ? messages : [])];
 }
 
 const CASCADE_REUSE_STRICT = process.env.CASCADE_REUSE_STRICT === '1';
@@ -367,6 +464,11 @@ const CASCADE_REUSE_ALLOW_SHARED_API_KEY = process.env.CASCADE_REUSE_ALLOW_SHARE
 function hasPerUserScope(callerKey) {
   if (typeof callerKey !== 'string' || !callerKey) return false;
   if (callerKey.includes(':user:')) return true;
+  // v2.0.37: apiKey-mode now appends `:client:<ip+ua>` when no body
+  // user signal is present, so single-user self-hosted setups land on
+  // a stable scope and cascade reuse works across turns. Match the
+  // segment anywhere in the string (#93 follow-up zhangzhang-bit).
+  if (callerKey.includes(':client:')) return true;
   if (callerKey.startsWith('session:') || callerKey.startsWith('client:')) return true;
   return false;
 }
@@ -380,11 +482,24 @@ function isToolSensitiveOpusModel(modelKey = '') {
   return /^claude-opus-4(?:[.-]6|[.-]7)(?:[-.]|$)/i.test(String(modelKey || ''));
 }
 
+function isSonnet46ToolReuseDisabled() {
+  return process.env.WINDSURFAPI_DISABLE_SONNET_TOOL_REUSE === '1';
+}
+
+function isSonnet46Model(modelKey = '') {
+  return /^claude-sonnet-4(?:[.-]6)(?:[-.]|$)/i.test(String(modelKey || ''));
+}
+
+export function isToolEmulatedReusableModel(modelKey = '') {
+  if (isToolSensitiveOpusModel(modelKey)) return true;
+  return !isSonnet46ToolReuseDisabled() && isSonnet46Model(modelKey);
+}
+
 // Tool-emulated requests are normally kept out of cascade_id reuse because
-// <tool_call>/<tool_result> bodies drift across turns. Opus 4.6 / 4.7 +
-// Claude Code is the exception: replaying the full prompt/tools/image
-// history is worse than preserving the exact upstream cascade, so enable
-// a narrow local path.
+// <tool_call>/<tool_result> bodies drift across turns. Opus 4.6 / 4.7 and
+// Sonnet 4.6 + Claude Code are the exceptions: replaying the full
+// prompt/tools/image history is worse than preserving the exact upstream
+// cascade, so enable a narrow local path.
 // thinking.type can be 'enabled' (Anthropic spec), 'adaptive' (what
 // Claude Code 2.x sonnet defaults to), or any future variant — accept
 // anything that isn't an explicit 'disabled' so the model still gets
@@ -397,14 +512,62 @@ export function isThinkingRequested(body) {
   return false;
 }
 
+function isOpus47ModelKey(modelKey) {
+  return /^claude-opus-4-7(?:-|$)/i.test(String(modelKey || ''));
+}
+
+function isOpus47ThinkingAutoRouteEnabled() {
+  return process.env.WINDSURFAPI_OPUS47_THINKING_UIDS === '1';
+}
+
+export function resolveEffectiveModelKey(modelKey, wantThinking) {
+  if (!wantThinking || !modelKey || modelKey.includes('thinking')) return modelKey;
+  const thinkingModelKey = modelKey + '-thinking';
+  if (!getModelInfo(thinkingModelKey)) return modelKey;
+  if (isOpus47ModelKey(modelKey) && !isOpus47ThinkingAutoRouteEnabled()) {
+    return modelKey;
+  }
+  return thinkingModelKey;
+}
+
 export function shouldUseCascadeReuse({ useCascade, emulateTools, modelKey, allowToolReuse = OPUS47_TOOL_EMULATED_REUSE }) {
   if (!useCascade) return false;
   if (!emulateTools) return true;
-  return !!allowToolReuse && isToolSensitiveOpusModel(modelKey);
+  return !!allowToolReuse && isToolEmulatedReusableModel(modelKey);
+}
+
+// Issue #86 follow-up (KLFDan0534): GLM 5.1 (and other non-reasoning models)
+// silently produce nothing in claudecode/openclaw — claudecode shows the
+// "thinking" indicator but the user sees no text and no thinking content.
+//
+// Root cause: cascade upstream sometimes packs the entire model response
+// into `step.thinking` instead of `step.responseText`. client.js routes
+// step.thinking → chunk.thinking → SSE `reasoning_content`. Claude Code
+// (and many OpenAI-style clients) hide reasoning_content by default and
+// only render `content` deltas. Result: visible silence.
+//
+// Fix: at stream end, for NON-reasoning models that produced ONLY thinking
+// (no text, no tool_calls), promote the thinking buffer to a content delta.
+// Reasoning models (caller asked for thinking, OR routing landed on a
+// -thinking variant) keep the original split behaviour — those clients
+// expect reasoning_content separately.
+// `wantThinking` collapses the prior `body` arg — callers compute it via
+// isThinkingRequested(body) at the entry point (handleChatCompletions),
+// then thread the boolean through deps. The previous shape leaked a
+// reference to `body` into streamResponse / nonStreamResponse where it
+// wasn't in scope, ReferenceError'ing every stream finish (#93 follow-up
+// reported by zhangzhang-bit).
+export function shouldFallbackThinkingToText({ routingModelKey, wantThinking, accText, accThinking, hasToolCalls }) {
+  if (hasToolCalls) return false;
+  if (accText && accText.length) return false;
+  if (!accThinking || !accThinking.length) return false;
+  if (routingModelKey && /thinking/i.test(routingModelKey)) return false;
+  if (wantThinking) return false;
+  return true;
 }
 
 function shouldForceCascadeReuse({ emulateTools, modelKey }) {
-  return !!emulateTools && OPUS47_TOOL_EMULATED_REUSE && isToolSensitiveOpusModel(modelKey);
+  return !!emulateTools && OPUS47_TOOL_EMULATED_REUSE && isToolEmulatedReusableModel(modelKey);
 }
 
 export function shouldUseStrictCascadeReuse({ emulateTools, modelKey, strict = CASCADE_REUSE_STRICT, allowOpus47Strict = OPUS47_STRICT_REUSE }) {
@@ -608,17 +771,31 @@ export function extractCallerEnvironment(messages) {
   // paths — "the working directory you choose" or similar abstract prose
   // never has a `/` or `~` in the captured slot and is rejected.
   const PATH_TAIL = `(?:[\\/~]|[A-Za-z]:\\\\)[^\\s\`'"<>\\n.,;)]+`;
+  // Adjective slot for "Working directory" — Claude Code 2.x uses
+  // "Primary working directory: D:\..." instead of the canonical
+  // "Working directory: ...". Other clients use "Current" / "Initial" /
+  // "Default" / "Active" / "Project" similarly. Optional, matched
+  // case-insensitively. (#106 / #107 follow-up: the user's 26 KB Claude
+  // Code system prompt mentions "current working directory" mid-prose
+  // first, then later has the actual `- Primary working directory: D:\...`
+  // bullet — old regex only allowed the canonical key so the bullet
+  // never matched and env never lifted.)
+  const ADJ = `(?:Primary|Current|Initial|Default|Active|Project|My)\\s+`;
   const PATTERNS = [
     ['cwd', new RegExp(
-      // Form (a): line-anchored key/value
-      `(?:^|\\n)\\s*(?:[-*]\\s+)?(?:Working directory|cwd|<cwd>)\\s*[:=]\\s*\`?(${PATH_TAIL})\`?` +
-      // Form (b): prose "current working directory is /path"
-      `|(?:current\\s+working\\s+directory(?:\\s+is)?)\\s*[:=]?\\s*\`?(${PATH_TAIL})\`?`,
-      'i'
+      // Form (a): line-anchored key/value, optional adjective prefix
+      `(?:^|\\n)\\s*(?:[-*]\\s+)?(?:${ADJ})?(?:Working\\s+directory|cwd)\\s*[:=]\\s*\`?(${PATH_TAIL})\`?` +
+      // Form (b): prose "current working directory is /path" (adjacent path)
+      `|(?:current\\s+working\\s+directory(?:\\s+is)?)\\s*[:=]?\\s*\`?(${PATH_TAIL})\`?` +
+      // Form (c): Codex / XML-style <cwd>/path/</cwd> tags (no :/= separator)
+      `|<cwd>\\s*(${PATH_TAIL})\\s*</cwd>`,
+      'gi'
     ), (v) => `- Working directory: ${v}`],
-    ['git', /(?:^|\n)\s*(?:[-*]\s+)?Is directory a git repo\s*[:=]\s*([^\n<]+)/i, (v) => `- Is the directory a git repo: ${v}`],
+    // Git repo: accept "Is directory a git repo" (Claude Code <2.x) AND
+    // "Is a git repository" / "Is git repo" (Claude Code 2.x).
+    ['git', /(?:^|\n)\s*(?:[-*]\s+)?Is(?:\s+(?:directory\s+)?(?:a\s+)?)git\s+repo(?:sitory)?\s*[:=]\s*([^\n<]+)/i, (v) => `- Is the directory a git repo: ${v}`],
     ['platform', /(?:^|\n)\s*(?:[-*]\s+)?Platform\s*[:=]\s*([^\n<]+)/i, (v) => `- Platform: ${v}`],
-    ['os', /(?:^|\n)\s*(?:[-*]\s+)?OS Version\s*[:=]\s*([^\n<]+)/i, (v) => `- OS version: ${v}`],
+    ['os', /(?:^|\n)\s*(?:[-*]\s+)?OS\s+[Vv]ersion\s*[:=]\s*([^\n<]+)/i, (v) => `- OS version: ${v}`],
   ];
 
   for (const m of messages) {
@@ -631,14 +808,25 @@ export function extractCallerEnvironment(messages) {
 
     for (const [key, re, fmt] of PATTERNS) {
       if (seen.has(key)) continue;
-      const match = content.match(re);
-      if (match) {
-        // The cwd pattern has two alternative capture groups (one per
-        // accepted form); the others have one. Pick the first non-empty.
+      // For the cwd pattern (global flag), iterate matches and pick the
+      // first one that actually has a non-empty captured path. The earlier
+      // matches in a long system prompt may be prose mentions like
+      // "...and the current working directory." with no adjacent path
+      // because the path lives in a later bullet — we must not stop at
+      // the first textual hit.
+      if (re.global) {
+        for (const match of content.matchAll(re)) {
+          const value = (match[1] || match[2] || '').trim();
+          if (!value || /[\x00-\x1f]/.test(value) || value === '<workspace>') continue;
+          seen.add(key);
+          out.push(fmt(value));
+          break;
+        }
+      } else {
+        const match = content.match(re);
+        if (!match) continue;
         const value = (match[1] || match[2] || '').trim();
-        // Reject obvious garbage (empty after trim, control chars, our own
-        // redaction marker leaking back in).
-        if (!value || /[\x00-\x1f]/.test(value) || value === '…') continue;
+        if (!value || /[\x00-\x1f]/.test(value) || value === '<workspace>') continue;
         seen.add(key);
         out.push(fmt(value));
       }
@@ -658,8 +846,127 @@ export function extractCallerEnvironment(messages) {
   // Sticking to the rule "no cwd → no block" both removes the noise and
   // lets the model learn cwd via its own `pwd` tool call (which already
   // works on every Anthropic-format client we have tested).
-  if (!seen.has('cwd')) return '';
+  if (!seen.has('cwd')) {
+    // #100 (yunduobaba) fallback — when the canonical extractors miss
+    // the cwd (some Claude Code forks / OpenCode variants don't emit
+    // a `<env>` block at all), scan the head of the first real user
+    // message for a bare absolute path. The user's prompt
+    //   "C:\Users\renfei\Downloads\WindsurfAPI-master 分析下这个项目"
+    // makes their intended workspace obvious — without this, cascade's
+    // built-in /tmp/windsurf-workspace prior wins and the model invents
+    // a JSON apology about Linux not being able to read Windows paths.
+    const cwd = scanUserMessageForBareCwd(messages);
+    if (cwd) return `- Working directory: ${cwd}`;
+
+    // #107 (zhangzhang-bit) fallback — the system prompt was 26 KB and
+    // referenced "current working directory" mid-prose with no adjacent
+    // path. The actual path was buried somewhere else as a bullet. The
+    // canonical regex now allows adjective prefixes ("Primary working
+    // directory") which covers the common Claude Code 2.x case, but
+    // some custom clients put the cwd on its own bullet with no key at
+    // all (just `- D:\Project\foo`). Scan all system messages for a
+    // standalone bullet/list line whose value is a single absolute path.
+    const bulletCwd = scanForBulletCwdInSystem(messages);
+    if (bulletCwd) return `- Working directory: ${bulletCwd}`;
+    return '';
+  }
   return out.join('\n');
+}
+
+// Last-resort cwd scan: walk every system message and look for a line
+// like `  - D:\Project\foo` or `* /home/dev/proj` whose only content is
+// a single absolute-looking path. This catches the case where a custom
+// agent prompt enumerates environment facts in a bulleted list but
+// uses no explicit "Working directory:" key. Restricted to system role
+// to avoid grabbing a path the user mentioned in passing later in chat.
+function scanForBulletCwdInSystem(messages) {
+  if (!Array.isArray(messages)) return '';
+  const FILE_EXT = /\.(?:js|mjs|cjs|ts|tsx|jsx|json|jsonc|md|mdx|py|pyc|go|rs|java|kt|swift|cpp|cc|cxx|c|h|hpp|html?|css|scss|sass|less|yaml|yml|toml|ini|cfg|conf|sh|bash|zsh|fish|ps1|bat|cmd|exe|dll|so|dylib|zip|tar|gz|bz2|xz|7z|rar|png|jpe?g|gif|webp|svg|ico|mp[34]|wav|flac|ogg|webm|mov|avi|mkv|pdf|docx?|xlsx?|pptx?|csv|tsv|sql|db|sqlite|log|lock|map|min\.js|min\.css)$/i;
+  const BULLET = /^[\s]*[-*•]\s+`?((?:[A-Za-z]:[\\/]|\/[A-Za-z]|~[\\/])[^\s`'"<>\n]+)`?\s*$/m;
+  for (const m of messages) {
+    if (m?.role !== 'system') continue;
+    let content;
+    if (typeof m.content === 'string') content = m.content;
+    else if (Array.isArray(m.content)) content = m.content.filter(p => p?.type === 'text').map(p => p.text || '').join('\n');
+    else continue;
+    if (!content) continue;
+    // matchAll requires the regex to be global; build a fresh global copy.
+    const re = new RegExp(BULLET.source, 'gm');
+    for (const match of content.matchAll(re)) {
+      const cand = match[1];
+      if (!cand || cand.length < 5) continue;
+      if (FILE_EXT.test(cand)) continue;
+      if (cand === '<workspace>') continue;
+      return cand;
+    }
+  }
+  return '';
+}
+
+// Bare-path fallback for extractCallerEnvironment. Looks at the FIRST
+// user-role message only (so a path appearing inside an assistant or
+// tool reply later in the conversation doesn't override the original
+// intent), takes the leading 200 chars (paths users care about appear
+// near the top of a prompt, not buried mid-sentence), and matches one
+// of three explicit absolute-path shapes:
+//
+//   - Windows  C:\... or C:/...
+//   - Unix     /home/..., /Users/..., /var/..., etc.
+//   - Tilde    ~/projects/...
+//
+// The path-tail charset is restricted to ASCII filesystem characters
+// (alnum, `_`, `-`, `.`, `/`, `\`) so a CJK character or whitespace
+// terminates the match cleanly — matters for prompts where the path is
+// glued straight to Chinese text without a space ("C:\foo分析这个").
+//
+// File-extension reject: a path ending in a common file extension is
+// almost certainly the user pointing at a single file, not the cwd.
+// We could try dirname() it but the heuristic is shaky enough that we
+// rather miss than mis-attribute.
+function scanUserMessageForBareCwd(messages) {
+  if (!Array.isArray(messages)) return '';
+  const FILE_EXT = /\.(?:js|mjs|cjs|ts|tsx|jsx|json|jsonc|md|mdx|py|pyc|go|rs|java|kt|swift|cpp|cc|cxx|c|h|hpp|html?|css|scss|sass|less|yaml|yml|toml|ini|cfg|conf|sh|bash|zsh|fish|ps1|bat|cmd|exe|dll|so|dylib|zip|tar|gz|bz2|xz|7z|rar|png|jpe?g|gif|webp|svg|ico|mp[34]|wav|flac|ogg|webm|mov|avi|mkv|pdf|docx?|xlsx?|pptx?|csv|tsv|sql|db|sqlite|log|lock|map|min\.js|min\.css)$/i;
+  // Reject content that is `<text> followed by <path>`. We anchor at ^ so the
+  // path must be the first non-trivial token after some leading punctuation /
+  // whitespace. After stripping wrappers like <system-reminder> the user's
+  // real prompt usually starts cleanly with the path.
+  const PATH_AT_HEAD = /^[\s,;:.，。、；：　"'`(\[]*((?:[A-Za-z]:[\\/]|\/[A-Za-z]|~[\\/])[A-Za-z0-9._\\/-]+)/;
+
+  const tryMatch = (text) => {
+    const match = text.match(PATH_AT_HEAD);
+    if (!match) return '';
+    const cand = match[1];
+    if (cand.length < 5) return '';
+    if (FILE_EXT.test(cand)) return '';
+    return cand;
+  };
+
+  for (const m of messages) {
+    if (m?.role !== 'user') continue;
+    let content;
+    if (typeof m.content === 'string') content = m.content;
+    else if (Array.isArray(m.content)) content = m.content.filter(p => p?.type === 'text').map(p => p.text || '').join('\n');
+    else continue;
+    if (!content) continue;
+
+    // Pass 1: head of the raw message. Cheapest path; covers vanilla CLIs
+    // that don't wrap user input in any preamble.
+    const direct = tryMatch(content.slice(0, 300));
+    if (direct) return direct;
+
+    // Pass 2 (#100 follow-up, yunduobaba): Claude Code's hooks inject one or
+    // more `<system-reminder>...</system-reminder>` blocks at the very top of
+    // every user message — frequently 1–5 KB before the user's actual text.
+    // That pushes the bare path past the 300-char head and pass 1 misses,
+    // even though the path is still the first thing the user typed. Strip
+    // those wrappers and try again with a slightly bigger window (the prose
+    // that follows tends to be longer than the raw input).
+    if (!/<system-reminder\b/i.test(content)) continue;
+    const stripped = content.replace(/<system-reminder\b[\s\S]*?<\/system-reminder>\s*/gi, '');
+    const wrapped = tryMatch(stripped.slice(0, 500));
+    if (wrapped) return wrapped;
+  }
+  return '';
 }
 
 // Rough token estimate (~4 chars/token). Used only to populate the
@@ -693,6 +1000,9 @@ function cachedUsage(messages, completionText) {
 }
 
 export function applyToolPreambleBudget(tools, toolChoice, callerEnv = '', opts = {}) {
+  const modelKey = opts.modelKey || null;
+  const provider = opts.provider || null;
+  const route = opts.route || null;
   const softBytes = opts.softBytes ?? parseInt(process.env.TOOL_PREAMBLE_SOFT_BYTES || '24000', 10);
   const hardBytes = opts.hardBytes ?? parseInt(process.env.TOOL_PREAMBLE_HARD_BYTES || '48000', 10);
   const tiers = [
@@ -701,7 +1011,7 @@ export function applyToolPreambleBudget(tools, toolChoice, callerEnv = '', opts 
     { tier: 'skinny', build: buildSkinnyToolPreambleForProto },
     { tier: 'names-only', build: buildCompactToolPreambleForProto },
   ];
-  const full = tiers[0].build(tools || [], toolChoice, callerEnv);
+  const full = tiers[0].build(tools || [], toolChoice, callerEnv, modelKey, provider, route);
   if (!full) {
     return { ok: true, preamble: '', fullBytes: 0, finalBytes: 0, compacted: false, tier: 'empty', softBytes, hardBytes };
   }
@@ -712,7 +1022,7 @@ export function applyToolPreambleBudget(tools, toolChoice, callerEnv = '', opts 
   // names-only and let the hard-cap check decide whether to reject.
   let chosen = { tier: 'full', preamble: full, bytes: fullBytes };
   for (const t of tiers) {
-    const text = t.tier === 'full' ? full : t.build(tools || [], toolChoice, callerEnv);
+    const text = t.tier === 'full' ? full : t.build(tools || [], toolChoice, callerEnv, modelKey, provider, route);
     const bytes = Buffer.byteLength(text, 'utf8');
     chosen = { tier: t.tier, preamble: text, bytes };
     if (bytes <= softBytes) break;
@@ -734,13 +1044,23 @@ export function applyToolPreambleBudget(tools, toolChoice, callerEnv = '', opts 
  *
  * The Cascade backend reports usage as {inputTokens, outputTokens,
  * cacheReadTokens, cacheWriteTokens}. We map them onto the OpenAI shape:
- *   prompt_tokens     = inputTokens + cacheReadTokens + cacheWriteTokens
- *                       (total input tokens the model processed, whether fresh,
- *                       cache-read, or cache-written — matches the OpenAI
- *                       convention where prompt_tokens is the grand total)
+ *   prompt_tokens     = inputTokens + cacheReadTokens
+ *                       (input the model saw this turn = fresh-input + cache-hit;
+ *                       cacheReadTokens is a SUBSET of prompt_tokens per OpenAI's
+ *                       cached_tokens spec, not an addition)
  *   completion_tokens = outputTokens
  *   prompt_tokens_details.cached_tokens       = cacheReadTokens
  *   cache_creation_input_tokens (Anthropic ext) = cacheWriteTokens
+ *
+ * v2.0.68 (#118 wnfilm): cacheWriteTokens is generation-side cache-write
+ * cost, NOT input the model processed — it used to land in prompt_tokens
+ * which made downstream billing relays (one-api / new-api / sub2api) bill
+ * cache-write as if it were normal prompt tokens, blowing through trial
+ * quotas in hours. cacheWriteTokens now ships only as the dedicated
+ * `cache_creation_input_tokens` field (Anthropic extension already
+ * supported by every modern relay). Total tokens still include it via
+ * grand-total summation so cost reports stay accurate, but per-bucket
+ * accounting matches OpenAI / Anthropic semantics.
  */
 // Anthropic prompt-caching ttl='1h' markers should keep the cascade
 // pool entry alive past its 30-minute default. 90 minutes = 1h cache
@@ -752,13 +1072,25 @@ function ttlHintFromCachePolicy(cachePolicy) {
   return 90 * 60 * 1000;
 }
 
-function buildUsageBody(serverUsage, messages, completionText, thinkingText = '', cachePolicy = null) {
+export function buildUsageBody(serverUsage, messages, completionText, thinkingText = '', cachePolicy = null) {
   if (serverUsage && (serverUsage.inputTokens || serverUsage.outputTokens)) {
     const inputTokens = serverUsage.inputTokens || 0;
     const outputTokens = serverUsage.outputTokens || 0;
     const cacheRead = serverUsage.cacheReadTokens || 0;
     const cacheWrite = serverUsage.cacheWriteTokens || 0;
-    const promptTotal = inputTokens + cacheRead + cacheWrite;
+    // OpenAI semantics: prompt_tokens = total input the model saw this turn,
+    // cached_tokens is a SUBSET of prompt_tokens that came from cache. So
+    // prompt_tokens = freshInput + cacheRead. cacheWrite is generation-side
+    // (the model wrote new content into cache for later reuse) and ships
+    // separately on cache_creation_input_tokens, not bundled into
+    // prompt_tokens. v2.0.68 (#118) — earlier code added cacheWrite to
+    // prompt_tokens which blew up downstream billing relays.
+    const promptTokens = inputTokens + cacheRead;
+    // Grand total includes cache-write so per-account cost accounting
+    // (auth.js usage tally, dashboard charts) still reflects the full
+    // cascade-side cost — only the per-bucket fields follow strict
+    // OpenAI/Anthropic semantics.
+    const totalTokens = promptTokens + outputTokens + cacheWrite;
     // Anthropic prompt-caching split: when the client tagged any block
     // with ttl='1h' the creation tokens go to ephemeral_1h, otherwise to
     // ephemeral_5m. Cascade doesn't separate the pools so we can't
@@ -770,16 +1102,26 @@ function buildUsageBody(serverUsage, messages, completionText, thinkingText = ''
       ephemeral_1h_input_tokens: cachePolicy?.has1h ? cacheWrite : 0,
     };
     return {
-      prompt_tokens: promptTotal,
+      prompt_tokens: promptTokens,
       completion_tokens: outputTokens,
-      total_tokens: promptTotal + outputTokens,
-      input_tokens: promptTotal,
+      total_tokens: totalTokens,
+      // OpenAI's `input_tokens` legacy field == prompt_tokens; same shape.
+      input_tokens: promptTokens,
       output_tokens: outputTokens,
       prompt_tokens_details: { cached_tokens: cacheRead },
       completion_tokens_details: { reasoning_tokens: 0 },
       cache_creation_input_tokens: cacheWrite,
       cache_read_input_tokens: cacheRead,
       cache_creation: cacheCreationSplit,
+      // Verbose breakdown for dashboards / billing relays that want the
+      // raw cascade numbers without recombining. Non-standard fields are
+      // ignored by spec-strict consumers.
+      cascade_breakdown: {
+        fresh_input_tokens: inputTokens,
+        cache_read_tokens: cacheRead,
+        cache_write_tokens: cacheWrite,
+        output_tokens: outputTokens,
+      },
     };
   }
   const prompt = estimateTokens(messages);
@@ -810,16 +1152,152 @@ async function waitForAccount(tried, signal, maxWaitMs = QUEUE_MAX_WAIT_MS, mode
   return acct;
 }
 
+// v2.0.66 (#115): codex CLI 0.128 sends `model="gpt-5.5"` together with a
+// separate `reasoning: {effort:"xhigh"}` (or top-level `reasoning_effort`)
+// field. Windsurf's catalog exposes per-effort variants as distinct model
+// ids — `gpt-5.5-xhigh`, `gpt-5.5-high`, `gpt-5.5-medium`, etc — and the
+// bare `gpt-5.5` alias resolves to `gpt-5.5-medium`. Without merging the
+// two fields, the user's `xhigh` knob is silently dropped (zhqsuo's #115
+// followup: log shows `model=gpt-5.5-medium reasoning=xhigh`).
+//
+// Merge logic: if reqModel has no effort suffix already AND
+// `${reqModel}-${effort}` resolves to a known model in the catalog, swap.
+// Anything else (unknown model, no effort, effort already in name)
+// returns reqModel unchanged.
+export function mergeReasoningEffortIntoModel(reqModel, body) {
+  if (!reqModel || typeof reqModel !== 'string') return reqModel;
+  const effort = String(
+    body?.reasoning_effort
+    || body?.reasoning?.effort
+    || ''
+  ).toLowerCase().trim();
+  if (!effort) return reqModel;
+  const VALID = new Set(['minimal', 'none', 'low', 'medium', 'high', 'xhigh']);
+  if (!VALID.has(effort)) return reqModel;
+  // Already has an effort suffix — don't double-stamp.
+  for (const e of VALID) {
+    if (reqModel.toLowerCase().endsWith('-' + e)) return reqModel;
+  }
+  // Try the merged form. resolveModel returns the model key if it exists,
+  // unchanged input otherwise; getModelInfo returns null for unknown models.
+  // Both checks together guard against accidentally inventing a model that
+  // doesn't exist in the catalog.
+  const merged = `${reqModel}-${effort === 'minimal' ? 'none' : effort}`;
+  const resolved = resolveModel(merged);
+  if (resolved && getModelInfo(resolved)) return merged;
+  return reqModel;
+}
+
+/**
+ * v2.0.85 (#126 KLFDan0534 + #128 wnfilm) — server-side auto-fallback
+ * on rate_limit_exceeded.
+ *
+ * Default ON. When the inner handler returns 429 with a `fallback_model`
+ * field (set by chat.js + stream.js when the whole pool is rate-limited
+ * on a high-effort variant like `claude-opus-4-7-max`), the wrapper
+ * silently retries the request against the suggested lower-effort
+ * variant. The caller sees a successful response under the original
+ * model name (we restore it post-flight) so existing client code is
+ * unaffected.
+ *
+ * Stream requests are NOT auto-retried — by the time the inner
+ * handler decides to error, no chunks have been written yet but the
+ * caller flow is harder to rewind. Stream callers see the 429 with
+ * the same `fallback_model` hint and can retry client-side.
+ *
+ * Disable via `WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT=0`.
+ */
+export function shouldAutoFallback(body, context, result) {
+  if (body?.stream) return false;
+  if (context?.__fallbackAttempt) return false;
+  // v2.0.85 default ON → v2.0.86 default OFF (regression #129) →
+  // v2.0.87 default ON again now that the cascade pool indexes the
+  // fallback cascade under BOTH the original and the fallback model
+  // fingerprint (alias write in conversation-pool.js + chat.js inner
+  // — see context.__aliasModelKey threading). This means the next
+  // turn from the client (under the original model name) finds the
+  // cascade in the pool and reuse stays intact across the fallback.
+  if (process.env.WINDSURFAPI_VARIANT_FALLBACK_ON_RATE_LIMIT === '0') return false;
+  const err = result?.body?.error;
+  if (!err) return false;
+  if (err.type !== 'rate_limit_exceeded') return false;
+  if (!err.fallback_model || typeof err.fallback_model !== 'string') return false;
+  return true;
+}
+
 export async function handleChatCompletions(body, context = {}) {
+  // v2.0.88 (audit H-3) — compute original cache key BEFORE any
+  // fallback rewrite. We pass it into the inner via context so a
+  // successful fallback writes into the cache slot the NEXT identical
+  // original-model request will look up, instead of the fallback-model
+  // slot that the next request will miss.
+  const originalCkey = cacheKey(body, context.callerKey || body.__callerKey || '');
+  const result = await _handleChatCompletionsInner(body, { ...context, __originalCkey: originalCkey });
+  if (shouldAutoFallback(body, context, result)) {
+    // v2.0.88 (audit H-1) — `body.model` is the RAW request string; the
+    // inner handler resolves it through mergeReasoningEffortIntoModel +
+    // resolveModel before computing fingerprints. If the client sends
+    // `model: claude-opus-4-7` + `reasoning_effort: max` (codex CLI
+    // pattern), `body.model` alone is `claude-opus-4-7`, but the
+    // routingModelKey used for cascade-pool fingerprints is the merged
+    // `claude-opus-4-7-max`. Passing raw `body.model` as
+    // `__aliasModelKey` would fingerprint to a slot the next turn
+    // never queries — silently re-introducing the v2.0.86 regression
+    // for any client that separates effort from model name.
+    const originalRoutingKey = resolveModel(mergeReasoningEffortIntoModel(body.model, body));
+    const originalModel = body.model;
+    const fallbackModel = result.body.error.fallback_model;
+    log.info(`auto-fallback: ${originalModel} → ${fallbackModel} (alias-key=${originalRoutingKey} whole pool rate_limited)`);
+    const fallbackResult = await _handleChatCompletionsInner(
+      { ...body, model: fallbackModel },
+      // __aliasModelKey carries the resolved/merged ORIGINAL routing
+      // key so cascade pool dual-index hits the slot the next turn
+      // will actually look up. __originalCkey threads through so
+      // cacheSet writes also go to the original-model cache slot.
+      { ...context, __fallbackAttempt: true, __aliasModelKey: originalRoutingKey, __originalCkey: originalCkey },
+    );
+    // Restore original model id in the response body so client code
+    // matching on `response.model === requested model` still works.
+    if (fallbackResult?.body) {
+      if (typeof fallbackResult.body === 'object' && 'model' in fallbackResult.body) {
+        fallbackResult.body.model = originalModel;
+      }
+      // v2.0.88 (audit M-5): nest under usage.cascade_breakdown
+      // instead of body root. OpenAI ChatCompletion top-level fields
+      // are spec'd; pydantic v2 with `extra='forbid'` (used by some
+      // strict client SDKs) rejected our root-level `served_model`.
+      // cascade_breakdown is already an accepted non-standard sibling
+      // inside `usage`, so served_model + fallback_reason ride along.
+      if (typeof fallbackResult.body === 'object' && !fallbackResult.body.error) {
+        const usage = fallbackResult.body.usage = fallbackResult.body.usage || {};
+        const cb = usage.cascade_breakdown = usage.cascade_breakdown || {};
+        cb.served_model = fallbackModel;
+        cb.fallback_reason = 'rate_limit_auto_fallback';
+      }
+    }
+    return fallbackResult;
+  }
+  return result;
+}
+
+async function _handleChatCompletionsInner(body, context = {}) {
   const reqId = Math.random().toString(36).slice(2, 8);
+  // v2.0.67 (#112): feed the quiet-window auto-updater. Cheap (one
+  // timestamp push); covers /v1/chat/completions, /v1/messages and
+  // /v1/responses since both messages.js and responses.js go through
+  // handleChatCompletions.
+  markQuietWindowRequest();
   const {
-    model: reqModel,
     stream = false,
     max_tokens,
     tools,
     tool_choice,
     response_format,
   } = body;
+  // v2.0.66: merge reasoning_effort into the model id BEFORE alias
+  // resolution so `gpt-5.5 + reasoning.effort=xhigh` resolves to
+  // `gpt-5.5-xhigh`, not the medium-tier default.
+  const reqModel = mergeReasoningEffortIntoModel(body.model, body);
   let messages = body.messages;
   const callerKey = context.callerKey || body.__callerKey || '';
   const cachePolicy = body.__cachePolicy || null;
@@ -909,12 +1387,11 @@ export async function handleChatCompletions(body, context = {}) {
 
   const modelKey = resolveModel(reqModel || config.defaultModel);
   const wantThinking = isThinkingRequested(body);
-  let effectiveModelKey = modelKey;
-  if (wantThinking && !modelKey.includes('thinking') && getModelInfo(modelKey + '-thinking')) {
-    effectiveModelKey = modelKey + '-thinking';
-  }
+  const effectiveModelKey = resolveEffectiveModelKey(modelKey, wantThinking);
   if (effectiveModelKey !== modelKey) {
     log.info(`Chat[${reqId}]: routed ${modelKey} -> ${effectiveModelKey} (wantThinking=${wantThinking})`);
+  } else if (wantThinking && isOpus47ModelKey(modelKey) && getModelInfo(modelKey + '-thinking') && !isOpus47ThinkingAutoRouteEnabled()) {
+    log.warn(`Chat[${reqId}]: Opus 4.7 thinking auto-route disabled; using base model ${modelKey}. Upstream LS rejects ${modelKey}-thinking as model not found. Set WINDSURFAPI_OPUS47_THINKING_UIDS=1 only after upstream registers it.`);
   }
   const routingModelKey = effectiveModelKey;
   const modelInfo = getModelInfo(effectiveModelKey) || getModelInfo(modelKey);
@@ -962,6 +1439,46 @@ export async function handleChatCompletions(body, context = {}) {
   const hasTools = Array.isArray(tools) && tools.length > 0;
   const hasToolHistory = Array.isArray(messages) && messages.some(m => m?.role === 'tool' || (m?.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length));
   const emulateTools = useCascade && (hasTools || hasToolHistory);
+
+  // v2.0.66 (#115) — partition-mode native tool bridge.
+  //
+  // Splits caller's tools[] into:
+  //   mapped:    have a TOOL_MAP entry → cascade native trajectory steps
+  //              (DEFAULT planner_mode + tool_allowlist + additional_steps[9])
+  //   unmapped:  no mapping → existing NO_TOOL emulation toolPreamble
+  //              (additional_instructions_section)
+  //
+  // Both subsets coexist in the same request — when codex CLI 0.128 sends
+  // 11 tools and only `shell_command` maps, the planner runs DEFAULT mode
+  // with shell_command enabled while update_plan / apply_patch / etc stay
+  // on the emulation path. See src/cascade-native-bridge.js for the
+  // partition / canMap / shouldUseNativeBridge gate.
+  //
+  // v2.0.65 used canMapAllTools (all-or-nothing) which never fired for
+  // codex CLI in production — the gate is now partitionTools().hasAny.
+  const toolPartition = hasTools ? partitionTools(tools) : { mapped: [], unmapped: tools || [], hasAny: false };
+  const nativeBridgeOn = useCascade && hasTools && shouldUseNativeBridge(tools, {
+    modelKey: routingModelKey,
+    provider: modelInfo?.provider || null,
+    route: body.__route || 'chat',
+  });
+  const nativeAdditionalSteps = nativeBridgeOn
+    ? buildAdditionalStepsFromHistory(messages || [])
+    : [];
+  const nativeAllowlist = nativeBridgeOn
+    ? Array.from(new Set(toolPartition.mapped
+        .map(t => TOOL_MAP[t?.function?.name]?.kind)
+        .filter(Boolean)))
+    : [];
+  // Tools we ship to the emulation toolPreamble: the unmapped subset when
+  // bridge is on, or the full tools[] when bridge is off (legacy behaviour).
+  const emulationTools = nativeBridgeOn ? toolPartition.unmapped : (tools || []);
+  const nativeCallerTools = nativeBridgeOn ? toolPartition.mapped : [];
+  if (nativeBridgeOn) {
+    const mappedNames = toolPartition.mapped.map(t => t?.function?.name).join(',') || '(none)';
+    const unmappedNames = toolPartition.unmapped.map(t => t?.function?.name).join(',') || '(none)';
+    log.info(`Chat[${reqId}]: native bridge ON — model=${routingModelKey} mapped=[${mappedNames}] unmapped=[${unmappedNames}] allowlist=${nativeAllowlist.join(',')} additional_steps=${nativeAdditionalSteps.length}`);
+  }
   // Build proto-level preamble (goes into tool_calling_section override).
   // Also inject into the last user message as fallback — some models in
   // NO_TOOL mode ignore the SectionOverride entirely and refuse to call
@@ -982,13 +1499,36 @@ export async function handleChatCompletions(body, context = {}) {
   // hard cap; v2.0.9 rejected on the full-schema size before compacting,
   // which broke real opencode / Claude Code setups with 30-50 MCP tools.
   if (emulateTools) {
-    const budget = applyToolPreambleBudget(tools || [], tool_choice, callerEnv);
+    // v2.0.66: when partition-mode native bridge is on, emulation only
+    // describes the *unmapped* tools. Mapped tools are delivered via
+    // cascade native trajectory steps and would only confuse the planner
+    // if they also appeared in the toolPreamble emulation block.
+    //
+    // v2.0.69 (#115 follow-up): operator can opt to suppress emulation
+    // toolPreamble entirely when partition mode is on
+    // (WINDSURFAPI_NATIVE_BRIDGE_NO_EMUL=1) — useful for diagnosing
+    // whether the long emulation block (200+ lines describing 10
+    // unmapped tools) is what's pushing GPT into refuse mode. With the
+    // flag on, the planner only sees its own native tool inventory and
+    // unmapped tools become silently invisible to the model. Trade-off:
+    // model can't call unmapped tools at all, but neither can it get
+    // confused about whether it should be using the cascade-native path
+    // or the emulation path.
+    const suppressEmul = nativeBridgeOn && process.env.WINDSURFAPI_NATIVE_BRIDGE_NO_EMUL === '1';
+    const budgetTools = suppressEmul ? [] : (emulationTools.length ? emulationTools : (tools || []));
+    const budget = applyToolPreambleBudget(budgetTools, tool_choice, callerEnv, {
+      modelKey: routingModelKey,
+      provider: modelInfo?.provider || null,
+      // v2.0.62 (#115) — pass route so GPT-family + Codex/Responses
+      // route picks the gpt_native dialect (bare-JSON anti-refusal).
+      route: body.__route || 'chat',
+    });
     preambleTier = budget.tier;
     if (budget.compacted) {
-      log.warn(`Probe[${reqId}]: toolPreamble ${Math.round(budget.fullBytes / 1024)}KB exceeds soft cap ${Math.round(budget.softBytes / 1024)}KB; using ${budget.tier} tier (${Math.round(budget.finalBytes / 1024)}KB, ${(tools || []).length} tools)`);
+      log.warn(`Probe[${reqId}]: toolPreamble ${Math.round(budget.fullBytes / 1024)}KB exceeds soft cap ${Math.round(budget.softBytes / 1024)}KB; using ${budget.tier} tier (${Math.round(budget.finalBytes / 1024)}KB, ${budgetTools.length} tools)`);
     }
     if (!budget.ok) {
-      log.warn(`Probe[${reqId}]: toolPreamble ${Math.round(budget.finalBytes / 1024)}KB exceeds hard cap ${Math.round(budget.hardBytes / 1024)}KB after ${budget.tier} tier; rejecting (${(tools || []).length} tools)`);
+      log.warn(`Probe[${reqId}]: toolPreamble ${Math.round(budget.finalBytes / 1024)}KB exceeds hard cap ${Math.round(budget.hardBytes / 1024)}KB after ${budget.tier} tier; rejecting (${budgetTools.length} tools)`);
       return {
         status: 400,
         body: {
@@ -1030,9 +1570,39 @@ export async function handleChatCompletions(body, context = {}) {
   if (disableUserToolFallback) {
     log.info(`Chat[${reqId}]: disabled user-message tool fallback for Opus 4.x multimodal turn`);
   }
-  let cascadeMessages = emulateTools
-    ? normalizeMessagesForCascade(messages, tools, { injectUserPreamble: !disableUserToolFallback })
-    : [...messages];
+  // Native bridge mutates the message list differently from emulation:
+  // tool_result turns become additional_steps[9] entries on the proto, not
+  // synthetic <tool_result> user turns in the conversation text. We strip
+  // those tool messages and assistant tool_calls entries from the cascade
+  // message list so the planner only sees real human / assistant text plus
+  // its trajectory inheritance — duplicate context would confuse it.
+  let cascadeMessages;
+  if (nativeBridgeOn) {
+    cascadeMessages = (messages || []).filter(m => {
+      if (m?.role === 'tool') return false;
+      if (m?.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length && !m.content) return false;
+      return true;
+    });
+  } else if (emulateTools) {
+    cascadeMessages = normalizeMessagesForCascade(messages, tools, {
+      injectUserPreamble: !disableUserToolFallback,
+      modelKey: routingModelKey,
+      provider: modelInfo?.provider || null,
+      route: body.__route || 'chat',
+    });
+  } else {
+    cascadeMessages = [...messages];
+  }
+  // Bundle the v2.0.65 native bridge handles into one opts object so we
+  // can thread it through nonStreamResponse / streamResponse / cascadeChat
+  // without growing every signature by 3+ params.
+  const nativeOpts = nativeBridgeOn ? {
+    enabled: true,
+    allowlist: nativeAllowlist,
+    additionalSteps: nativeAdditionalSteps,
+    callerLookup: buildReverseLookup(nativeCallerTools),
+    callerTools: nativeCallerTools,
+  } : null;
 
   // Note: previous versions injected (a) a CJK language-following hint into
   // the last user message and (b) a per-provider identity system prompt
@@ -1064,6 +1634,37 @@ export async function handleChatCompletions(body, context = {}) {
     };
   }
 
+  // v2.0.58 — drought mode + premium model gate. When every active
+  // account is below the weekly threshold AND the operator has the
+  // restriction enabled (default ON, toggleable from dashboard or env
+  // DROUGHT_RESTRICT_PREMIUM=0), refuse premium models with a clean
+  // 503 + retry-after instead of letting the request burn its way to
+  // an upstream rate-limit. Free-tier models (gemini-2.5-flash etc.)
+  // still go through.
+  if (isModelBlockedByDrought(routingModelKey)) {
+    const summary = getDroughtSummary();
+    const freeList = (summary.freeTierModels || []).slice(0, 4).join(', ') || 'gemini-2.5-flash';
+    const retryAfterSec = Math.max(60, Math.min(60 * 60 * 24, 60 * 30)); // hint 30 min by default
+    log.warn(`Chat[drought]: blocking premium model ${routingModelKey} (lowestWeekly=${summary.lowestWeeklyPercent}%, ${summary.knownAccounts}/${summary.activeAccounts} accounts known)`);
+    return {
+      status: 503,
+      headers: { 'Retry-After': String(retryAfterSec) },
+      body: {
+        error: {
+          message: `账号池处于配额低水位（drought mode）：所有账号本周配额都低于 ${summary.threshold}%，已暂时屏蔽 premium 模型 ${displayModel}。请改用免费层模型（${freeList}…），或等周配额重置。可在 Dashboard 实验性面板关闭 droughtRestrictPremium 强制下发（会消耗最后一点配额）。`,
+          type: 'drought_mode',
+          drought: {
+            lowestWeeklyPercent: summary.lowestWeeklyPercent,
+            lowestDailyPercent: summary.lowestDailyPercent,
+            threshold: summary.threshold,
+            activeAccounts: summary.activeAccounts,
+            allowedModels: summary.freeTierModels,
+          },
+        },
+      },
+    };
+  }
+
   // Global model access control (allowlist / blocklist from dashboard)
   const access = isModelAllowed(routingModelKey);
   if (!access.allowed) {
@@ -1075,16 +1676,47 @@ export async function handleChatCompletions(body, context = {}) {
   // through every account trying to find one. This surfaces tier
   // entitlement and blocklist errors as a clean 403 rather than a 30s
   // queue timeout → pool_exhausted.
-  const anyEligible = getAccountList().some(a =>
+  //
+  // QQ-group 2026-04-30 follow-up: if the only ineligibility is that a
+  // freshly-added account hasn't been probed yet (userStatusLastFetched=0),
+  // the unknown tier is now optimistic (= pro catalog) so this branch
+  // shouldn't fire for that case. If we DO end up here with un-probed
+  // accounts, surface a different message hinting at probe-pending state
+  // rather than the misleading "model not entitled" — that error shaped
+  // user reports of "获取不到模型" / "添加账号后不能调用".
+  const accounts = getAccountList();
+  const anyEligible = accounts.some(a =>
     a.status === 'active' && (a.availableModels || []).includes(routingModelKey)
   );
   if (!anyEligible) {
+    const hasUnprobedActive = accounts.some(a => a.status === 'active' && !a.userStatusLastFetched);
+    // v2.0.71 (#117 follow-up): list models the pool actually CAN serve so
+    // the caller's dashboard / test harness can fall back instead of just
+    // showing "model_not_entitled" with no hint. Build the union of
+    // availableModels across active accounts (top 8 by frequency).
+    const counter = new Map();
+    for (const a of accounts) {
+      if (a.status !== 'active') continue;
+      for (const m of (a.availableModels || [])) {
+        counter.set(m, (counter.get(m) || 0) + 1);
+      }
+    }
+    const availableInPool = [...counter.entries()].sort(([, a], [, b]) => b - a).slice(0, 8).map(([m]) => m);
+    const remediation = hasUnprobedActive
+      ? '账号刚添加，等 10-30 秒 tier 检测完成后重试，或 dashboard 手动 Probe。'
+      : availableInPool.length
+        ? `账号池里能用的模型：${availableInPool.join(', ')}。换其中一个，或加一个有 ${displayModel} 订阅权限的账号。`
+        : '账号池里没有任何可用模型 — 检查账号是否被封禁或全部限流。';
     return {
       status: 403,
       body: {
         error: {
-          message: `模型 ${displayModel} 在当前账号池中不可用（未订阅或已被封禁）`,
-          type: 'model_not_entitled',
+          message: hasUnprobedActive
+            ? `模型 ${displayModel} 暂不可用：账号刚添加还未完成 tier 检测，请稍候 10-30 秒后重试，或在 dashboard 手动点 Probe`
+            : `模型 ${displayModel} 在当前账号池中不可用（未订阅或已被封禁）`,
+          type: hasUnprobedActive ? 'probe_pending' : 'model_not_entitled',
+          remediation,
+          available_in_pool: availableInPool,
         },
       },
     };
@@ -1092,14 +1724,35 @@ export async function handleChatCompletions(body, context = {}) {
 
   const chatId = genId();
   const created = Math.floor(Date.now() / 1000);
-  const ckey = cacheKey(body);
+  const ckey = cacheKey(body, callerKey);
 
   if (stream) {
-    return streamResponse(chatId, created, displayModel, routingModelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, ckey, emulateTools, toolPreamble, reqId, wantJson, callerKey, {
+    return streamResponse(
+      chatId,
+      created,
+      displayModel,
+      routingModelKey,
+      modelInfo?.provider || null,
+      messages,
+      cascadeMessages,
+      modelEnum,
+      modelUid,
+      useCascade,
+      ckey,
+      emulateTools,
+      toolPreamble,
+      reqId,
+      wantJson,
+      callerKey,
+      {
       checkMessageRateLimit: checkMessageRateLimitFn,
       waitForAccount: waitForAccountFn,
       cachePolicy,
+      wantThinking,
       fpOpts: buildReuseOpts({ tools, toolChoice: tool_choice, toolPreamble, preambleTier, emulateTools, route: body.__route || 'chat' }),
+      tools,
+      route: body.__route || 'chat',
+      nativeOpts,
     });
   }
 
@@ -1139,6 +1792,20 @@ export async function handleChatCompletions(body, context = {}) {
   const fpBefore = reuseEnabled ? fingerprintBefore(messages, routingModelKey, callerKey, fpOpts) : null;
   let reuseEntry = reuseEnabled ? poolCheckout(fpBefore, callerKey) : null;
   let checkedOutReuseEntry = reuseEntry;
+  // v2.0.71 (#116 zhangzhang-bit follow-up): structured reuse log so
+  // operators can see whether multi-turn cascades are actually reusing
+  // server-side context, vs. hitting a fingerprint miss every turn
+  // and replaying the entire history. Critical for diagnosing
+  // "model keeps re-analysing the same data" loops.
+  if (reuseEnabled) {
+    log.info(`Chat[${reqId}]: reuse fp=${fpBefore?.slice(0, 12) || 'none'} ${reuseEntry ? `HIT cascade=${reuseEntry.cascadeId.slice(0, 8)}` : 'MISS'} turns=${(messages || []).length} model=${routingModelKey}`);
+  } else if (sharedApiKeyNoScope) {
+    log.info(`Chat[${reqId}]: reuse DISABLED (shared API key, no per-user scope)`);
+  } else if (!shouldUseCascadeReuse({ useCascade, emulateTools, modelKey: routingModelKey })) {
+    log.info(`Chat[${reqId}]: reuse DISABLED (model ineligible)`);
+  } else {
+    log.info(`Chat[${reqId}]: reuse DISABLED (experimental.cascadeConversationReuse=off)`);
+  }
   // v2.0.25 HIGH-2: a SendUserCascadeMessage that hit "cascade not found"
   // marks the entry dead — any restore path further down must drop it
   // instead of putting a known-dead cascadeId back in the pool.
@@ -1214,6 +1881,17 @@ export async function handleChatCompletions(body, context = {}) {
             status: (tempUnavail.allUnavailable || rateLimited.allLimited) ? 429 : 503,
             body: { error: { message: `${displayModel} 账号队列超时: ${reason}`, type: (tempUnavail.allUnavailable || rateLimited.allLimited) ? 'rate_limit_exceeded' : 'pool_exhausted' } },
           };
+          // v2.0.84 (#118 0a00) — pool-wide rate limit on a high-effort
+          // variant (`-max` / `-xhigh`)? Suggest the same-base lower-
+          // effort sibling so the caller can switch off the weekly-
+          // quota-tight tier.
+          if (rateLimited.allLimited || tempUnavail.allUnavailable) {
+            const fb = pickRateLimitFallback(routingModelKey || displayModel);
+            if (fb) {
+              lastErr.body.error.fallback_model = fb;
+              lastErr.body.error.remediation = `池里所有账号在 ${displayModel} 上都已限流。这个 effort 变体上游限频严（每账号几十分钟滑窗），建议改用 ${fb}（同基础模型，effort 等级更低，daily quota 更宽松）。`;
+            }
+          }
         }
         break;
       }
@@ -1277,29 +1955,68 @@ export async function handleChatCompletions(body, context = {}) {
     const result = await nonStreamResponse(
       client, chatId, created, displayModel, routingModelKey, messages, cascadeMessages, modelEnum, modelUid,
       useCascade, acct.apiKey, ckey,
-      reuseEnabled ? { reuseEntry, lsPort: ls.port, apiKey: acct.apiKey, callerKey, cachePolicy, fpOpts } : null,
-      emulateTools, toolPreamble, wantJson, cachePolicy,
+      // v2.0.87 (#129) — aliasModelKey is set by the outer wrapper
+      // when this handler is the second pass of an auto-fallback
+      // retry; it carries the ORIGINAL model name the client asked
+      // for so the cascade pool entry gets indexed under both keys.
+      reuseEnabled ? { reuseEntry, lsPort: ls.port, apiKey: acct.apiKey, callerKey, cachePolicy, fpOpts, aliasModelKey: context.__aliasModelKey || null } : null,
+      modelInfo?.provider || null,
+      emulateTools, toolPreamble, wantJson, cachePolicy, wantThinking, tools, body.__route || 'chat',
+      nativeOpts,
+      // v2.0.88 (audit H-3) — when this is the inner-pass of an auto-
+      // fallback retry, the outer wrapper threads the ORIGINAL request's
+      // ckey through context.__originalCkey. We pass it down so the
+      // success-path cacheSet writes under the original key as well —
+      // next identical original-model request hits cache instead of
+      // re-burning the rate-limit + fallback cycle.
+      context.__originalCkey || null,
     );
     if (result.status === 200) return result;
     reuseEntry = null; // don't try to reuse on the retry
     if (result.reuseEntryInvalid) reuseEntryDead = true;
+    // #101: same upstream-timeout invalidation as the stream path —
+    // see the matching catch block in streamResponse for the full
+    // rationale (cascade trajectory left half-broken, next reuse hits
+    // it and the model "loses" the prior conversation).
+    const _resultMsg = String(result.body?.error?.message || '');
+    if (/context deadline exceeded|context cancellation while reading body|client\.timeout/i.test(_resultMsg)) {
+      reuseEntryDead = true;
+    }
     lastErr = result;
     const errType = result.body?.error?.type;
+    // v2.0.61 (#113): policy_blocked → don't rotate accounts, return
+    // immediately. The model refused the request, swapping accounts
+    // gives the same refusal but burns more quota.
+    if (errType === 'policy_blocked') { recordPolicyBlocked(); return result; }
     // Rate limit: this account is done for this model, try the next one
     if (errType === 'rate_limit_exceeded') {
-      if (!reuseEntryDead && strictReuse && checkedOutReuseEntry && fpBefore && checkedOutReuseEntry.apiKey === acct.apiKey) {
-        const availability = getAccountAvailability(acct.apiKey, routingModelKey);
-        const retryAfterMs = strictReuseRetryMs(availability);
-        poolCheckin(fpBefore, checkedOutReuseEntry, callerKey, ttlHintFromCachePolicy(cachePolicy));
-        log.info(`Chat[${reqId}]: strict reuse preserved cascade after rate limit`);
+      recordRateLimited();
+      // v2.0.91 — IP-level circuit breaker: when Windsurf upstream
+      // rate-limits several accounts for the same model in a tight
+      // window, it's usually IP-wide cooldown, not per-account.
+      // Burning through all 40+ accounts just marks them all dead
+      // for 30 min. Detect and short-circuit.
+      if (!context.__rateLimitEvents) context.__rateLimitEvents = [];
+      const RL_WINDOW_MS = 8_000;
+      const RL_BURST_THRESHOLD = 3;
+      context.__rateLimitEvents.push({ time: Date.now(), model: routingModelKey, account: acct.id });
+      // Prune old events
+      const cutoff = Date.now() - RL_WINDOW_MS;
+      while (context.__rateLimitEvents.length && context.__rateLimitEvents[0].time < cutoff) {
+        context.__rateLimitEvents.shift();
+      }
+      const sameModelBurst = context.__rateLimitEvents.filter(e => e.model === routingModelKey);
+      if (sameModelBurst.length >= RL_BURST_THRESHOLD) {
+        const maxCooldown = Math.max(...sameModelBurst.map(() => 30_000));
+        log.warn(`Chat[${reqId}]: IP-rate-limit burst detected — ${sameModelBurst.length} accounts rate-limited on ${displayModel} within ${RL_WINDOW_MS}ms. Short-circuiting.`);
         return {
           status: 429,
-          headers: { 'Retry-After': String(Math.ceil(retryAfterMs / 1000)) },
+          headers: { 'Retry-After': String(Math.ceil(maxCooldown / 1000)) },
           body: {
             error: {
-              message: strictReuseMessage(displayModel, retryAfterMs, availability.reason),
+              message: `All accounts temporarily rate-limited on ${displayModel}. Windsurf upstream is applying IP-level cooldown. Wait ${Math.ceil(maxCooldown / 1000)}s before retrying, or switch to a different model.`,
               type: 'rate_limit_exceeded',
-              retry_after_ms: retryAfterMs,
+              retry_after_ms: maxCooldown,
             },
           },
         };
@@ -1380,8 +2097,9 @@ export async function handleChatCompletions(body, context = {}) {
   return lastErr || { status: 503, body: { error: { message: 'No active accounts available', type: 'pool_exhausted' } } };
 }
 
-async function nonStreamResponse(client, id, created, model, modelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, apiKey, ckey, poolCtx, emulateTools, toolPreamble, wantJson = false, cachePolicy = null) {
+async function nonStreamResponse(client, id, created, model, modelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, apiKey, ckey, poolCtx, provider, emulateTools, toolPreamble, wantJson = false, cachePolicy = null, wantThinking = false, tools = [], route = 'chat', nativeOpts = null, aliasCkey = null) {
   const startTime = Date.now();
+  const nativeBridgeOn = !!nativeOpts?.enabled;
   try {
     let allText = '';
     let allThinking = '';
@@ -1393,7 +2111,14 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     let serverUsage = null;
 
     if (useCascade) {
-      const chunks = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, { reuseEntry: poolCtx?.reuseEntry || null, toolPreamble, displayModel: model });
+      const chunks = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, {
+        reuseEntry: poolCtx?.reuseEntry || null,
+        toolPreamble: nativeBridgeOn ? '' : toolPreamble,
+        displayModel: model,
+        nativeMode: nativeBridgeOn,
+        nativeAllowlist: nativeOpts?.allowlist || null,
+        additionalSteps: nativeOpts?.additionalSteps || null,
+      });
       for (const c of chunks) {
         if (c.text) allText += c.text;
         if (c.thinking) allThinking += c.thinking;
@@ -1405,19 +2130,221 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
         generatorOffset: chunks.generatorOffset,
       };
       serverUsage = chunks.usage || null;
-      if (emulateTools) {
-        const parsed = parseToolCallsFromText(allText);
+      if (nativeBridgeOn) {
+        // v2.0.65: planner-native trajectory steps come back via
+        // chunks.toolCalls with `cascade_native: true`. Translate each
+        // back into the caller's OpenAI tool name + the schema the caller
+        // declared. Steps without a caller mapping are dropped — they
+        // can't be safely surfaced (caller wouldn't know how to execute).
+        const lookup = nativeOpts?.callerLookup || new Map();
+        const nativeCalls = [];
+        for (const raw of (chunks.toolCalls || [])) {
+          if (!raw?.cascade_native) continue;
+          const candidates = lookup.get(raw.name) || [];
+          const callerName = candidates[0];
+          if (!callerName) continue;
+          const reverseFn = TOOL_MAP[callerName]?.reverse;
+          let cascadeArgs;
+          try { cascadeArgs = JSON.parse(raw.argumentsJson || '{}'); } catch { cascadeArgs = {}; }
+          let openaiArgs;
+          try { openaiArgs = reverseFn ? reverseFn(cascadeArgs) : cascadeArgs; }
+          catch { openaiArgs = cascadeArgs; }
+          nativeCalls.push({
+            id: raw.id || `call_${nativeCalls.length}_${Date.now().toString(36)}`,
+            name: callerName,
+            argumentsJson: JSON.stringify(openaiArgs ?? {}),
+          });
+        }
+        toolCalls = filterToolCallsByAllowlist(nativeCalls, tools);
+        // Strip any tool-call markup that may have leaked into text — the
+        // planner sometimes narrates "I'm going to look at X" alongside
+        // emitting the cascade step, and the caller doesn't want that
+        // noise.
+        allText = stripToolMarkupFromText(allText);
+        if (toolCalls.length === 0 && (chunks.toolCalls || []).length > 0) {
+          log.info(`Chat[non-stream]: nativeBridge=true received ${chunks.toolCalls.length} cascade tool calls but none mapped to caller tools (kinds=${chunks.toolCalls.map(tc => tc.name).join(',')})`);
+        }
+      } else if (emulateTools) {
+        // Capture pre-parse text once for diagnostic logging — useful when
+        // non-Claude models emit a tool call in a format the parser missed.
+        // Sample only the first 240 chars to keep logs sane.
+        const rawTextHead = allText.slice(0, 240).replace(/\s+/g, ' ');
+        const parsed = parseToolCallsFromText(allText, {
+          modelKey,
+          provider,
+          // v2.0.62 (#115) — route lets the parser pick the gpt_native
+          // dialect when responses.js routed here for a GPT-family model.
+          route,
+        });
         allText = parsed.text;
-        toolCalls = parsed.toolCalls;
+        // v2.0.55 audit M2: drop tool_calls whose name isn't in the
+        // request-declared tools[] (salvage parser otherwise lets
+        // prompt-injection payloads emit calls for tools the caller
+        // never offered, e.g. `Bash` when only `get_weather` is declared).
+        toolCalls = filterToolCallsByAllowlist(parsed.toolCalls, tools);
+        // Diagnostic: emulation was active and the model returned text but no
+        // recognized tool call. Surface tool-shaped substrings so we can see
+        // whether the model emitted an unsupported format (markdown-fenced
+        // JSON, OpenAI native function_call, natural-language "I'll call X")
+        // vs simply ignored the prompt and answered conversationally. Used to
+        // diagnose "tool_use never appears" reports — issue #109 sub2api E2E.
+        // v2.0.72 fix: GLM-4.7 / GLM-5.1 sometimes emit narration in
+        // CortexStepPlannerResponse.thinking instead of .response, so
+        // allText is empty while allThinking carries the actual model
+        // output. Combine both for marker detection / NLU recovery so
+        // we see narrate-style tool intents either way. Promotion to
+        // allText (line ~2155 below) happens after this; we use the
+        // combined source proactively.
+        const narrativeSource = (allText && allText.trim()) ? allText : allThinking;
+        if (toolCalls.length === 0 && narrativeSource) {
+          const markers = [];
+          if (/<tool_call/i.test(narrativeSource)) markers.push('xml_tag');
+          if (/```\s*(?:json|tool_call)/i.test(narrativeSource)) markers.push('fenced_json');
+          if (/"function"\s*:|"tool_calls"\s*:|"function_call"\s*:/.test(narrativeSource)) markers.push('openai_native');
+          if (/\{\s*"name"\s*:\s*"[a-zA-Z0-9_-]+"\s*,\s*"arguments"/.test(narrativeSource)) markers.push('bare_json');
+          if (/^\s*(?:I'?ll|I will|Let me|I'?m going to)\s+(?:call|use|invoke|run)/im.test(narrativeSource)) markers.push('natural_lang');
+          log.info(`Chat[non-stream]: emulateTools=true but parser found 0 tool_calls (model=${modelKey} provider=${provider}); markers=${markers.join(',') || 'none'}; head="${rawTextHead}"`);
+          // v2.0.72 (#115 #120) — NLU intent recovery. GPT/GLM/Kimi
+          // narrate "I'll call X with Y" instead of emitting the
+          // <tool_call> markup. Try to extract tool_call(s) from
+          // natural-language narrative before falling back to
+          // fabricate detection.
+          //
+          // v2.0.76 (#120 follow-up): widened to also fire when markers
+          // were DETECTED but parsing produced 0 tool_calls. v2.0.75
+          // probe caught GLM-4.7 emitting `markers=bare_json` (a JSON
+          // sigil in thinking text) where the parser couldn't lift a
+          // call but the surrounding narrative held everything NLU
+          // needs. Restricting NLU to markers=none meant those cases
+          // got 0 tool_calls back.
+          if (Array.isArray(tools) && tools.length > 0) {
+            const lastUser = latestRealUserText(messages) || '';
+            const recovered = extractIntentFromNarrative(narrativeSource, tools, { lastUserText: lastUser, markers });
+            if (recovered.length) {
+              const recoveredCalls = recovered.map((r, i) => ({
+                id: `nlu_${i}_${Date.now().toString(36)}`,
+                name: r.name,
+                argumentsJson: r.argumentsJson,
+              }));
+              const filtered = filterToolCallsByAllowlist(recoveredCalls, tools);
+              if (filtered.length) {
+                log.info(`Chat[non-stream]: NLU recovery — promoted ${filtered.length} narrative tool_call(s) (markers=${markers.join(',') || 'none'} head="${rawTextHead}")`);
+                toolCalls = filtered;
+                allText = '';
+                allThinking = '';
+              }
+            }
+          }
+          // v2.0.82 (#125) — translator-layer retry-with-correction.
+          // When NLU recovery can't lift a tool_call AND the narrative
+          // clearly intended one (mentions a declared tool name + an
+          // action verb + user prompt is actionable), spend one extra
+          // cascade round-trip with the model's prior narrate folded
+          // into history + a correction prompt asking it to re-emit
+          // using the protocol. GLM-5.1 / Kimi-K2 narrate-without-
+          // args case (#125 DuZunTianXia) goes from 0 tool_calls to
+          // a real protocol emit on the second pass.
+          //
+          // Default OFF — burns 2x account quota when active. Operator
+          // opts in via WINDSURFAPI_NLU_RETRY=1.
+          if (toolCalls.length === 0
+              && process.env.WINDSURFAPI_NLU_RETRY === '1'
+              && Array.isArray(tools) && tools.length > 0
+              && narrativeSource) {
+            const lastUser = latestRealUserText(messages) || '';
+            const intendedTool = detectToolIntentInNarrative(narrativeSource, tools, { lastUserText: lastUser });
+            if (intendedTool) {
+              try {
+                // Build correction history. The cascade backend treats
+                // the assistant turn as a "previous response" the model
+                // can read, then the user turn frames the correction.
+                // Bilingual phrasing because GLM/Kimi often run on
+                // Chinese system prompts.
+                const correctionMessages = [
+                  ...cascadeMessages,
+                  { role: 'assistant', content: narrativeSource.slice(0, 4000) },
+                  { role: 'user', content:
+                    `Your previous response described intending to call \`${intendedTool}\` but didn't emit the tool-call protocol block. ` +
+                    `Re-emit the call now using the EXACT protocol format defined at the top of this conversation. ` +
+                    `Do NOT narrate. Do NOT describe. Just the protocol block. ` +
+                    `Provide a concrete argument value (the literal command / file path / query) — never placeholders like "command" or "the file". ` +
+                    `\n\n你刚才描述了想用 \`${intendedTool}\` 工具但没按协议格式 emit。请直接重新 emit 协议块，不要 narrate。给具体的 argument 字面值（如 ls / /etc/hostname / "echo hi"），不要写"命令" / "文件" 这种占位词。` },
+                ];
+                log.info(`Chat[non-stream]: NLU retry — first pass narrate-only, retrying with correction (tool=${intendedTool} markers=${markers.join(',') || 'none'})`);
+                const retryChunks = await client.cascadeChat(correctionMessages, modelEnum, modelUid, {
+                  reuseEntry: null,
+                  toolPreamble: nativeBridgeOn ? '' : toolPreamble,
+                  displayModel: model,
+                  nativeMode: nativeBridgeOn,
+                  nativeAllowlist: nativeOpts?.allowlist || null,
+                  additionalSteps: nativeOpts?.additionalSteps || null,
+                });
+                let retryText = '';
+                let retryThinking = '';
+                for (const c of retryChunks) {
+                  if (c.text) retryText += c.text;
+                  if (c.thinking) retryThinking += c.thinking;
+                }
+                const retryParsed = parseToolCallsFromText(retryText, { modelKey, provider, route });
+                let retryCalls = filterToolCallsByAllowlist(retryParsed.toolCalls || [], tools);
+                if (!retryCalls.length) {
+                  const retrySource = retryText.trim() ? retryText : retryThinking;
+                  const recovered2 = extractIntentFromNarrative(retrySource, tools, { lastUserText: lastUser });
+                  if (recovered2.length) {
+                    retryCalls = filterToolCallsByAllowlist(
+                      recovered2.map((r, i) => ({ id: `nlu_retry_${i}_${Date.now().toString(36)}`, name: r.name, argumentsJson: r.argumentsJson })),
+                      tools,
+                    );
+                  }
+                }
+                if (retryCalls.length) {
+                  log.info(`Chat[non-stream]: NLU retry — promoted ${retryCalls.length} tool_call(s) on second pass (tool=${intendedTool})`);
+                  toolCalls = retryCalls;
+                  allText = retryParsed.text || '';
+                  allThinking = '';
+                } else {
+                  log.warn(`Chat[non-stream]: NLU retry — second pass also produced 0 tool_calls; giving up (model=${modelKey})`);
+                }
+              } catch (retryErr) {
+                log.warn(`Chat[non-stream]: NLU retry failed: ${retryErr.message}`);
+              }
+            }
+          }
+          // v2.0.71 (#115) — fabricate detection. When markers=none,
+          // NLU recovery didn't pick up anything, AND output pattern-
+          // matches a hallucinated tool result, warn at log level and
+          // (optionally) reject so the agent loop doesn't treat fake
+          // output as a real tool result.
+          if (markers.length === 0 && toolCalls.length === 0) {
+            const lastUser = latestRealUserText(messages) || '';
+            const fab = detectFabricatedToolResult(narrativeSource, { lastUserText: lastUser });
+            if (fab) {
+              log.warn(`Chat[non-stream]: fabricate detected — model=${modelKey} pattern=${fab.matchedPattern} sample="${fab.sample}"`);
+              if (process.env.WINDSURFAPI_FABRICATE_REJECT === '1') {
+                return {
+                  status: 502,
+                  body: {
+                    error: {
+                      message: `Tool-call fabrication detected: ${fab.hint}`,
+                      type: 'fabricated_tool_result',
+                      sample: fab.sample,
+                    },
+                  },
+                };
+              }
+            }
+          }
+        }
       } else {
         allText = stripToolMarkupFromText(allText);
       }
       // Built-in Cascade tool calls (chunks.toolCalls — edit_file, view_file,
-      // list_directory, run_command, etc.) are intentionally DROPPED. Their
-      // argumentsJson and result fields reference server-internal paths like
-      // /tmp/windsurf-workspace/config.yaml and must never be exposed to an
-      // API caller. Emulated tool calls (above) are safe because they
-      // reference the caller's own tool schema.
+      // list_directory, run_command, etc.) are intentionally DROPPED in
+      // emulation/legacy paths. Their argumentsJson and result fields may
+      // reference server-internal paths like /tmp/windsurf-workspace/config.yaml
+      // and must never be exposed to an API caller. The native bridge path
+      // above is the ONLY surface that surfaces these — and it sanitises
+      // each tool call's args via reverse mapping before emitting.
     } else {
       const chunks = await client.rawGetChatMessage(messages, modelEnum, modelUid);
       for (const c of chunks) {
@@ -1436,18 +2363,46 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     if (toolCalls.length) {
       toolCalls = toolCalls.map(tc => sanitizeToolCall(repairToolCallArguments(tc, messages)));
     }
+    // GLM5.1 silence fallback (#86 follow-up KLFDan0534) — non-stream path.
+    // Same logic as streamResponse: if a non-reasoning model produced ONLY
+    // thinking content (and no tool_calls), promote thinking to text so the
+    // OpenAI-compatible client renders it as `content`, not `reasoning_content`.
+    if (shouldFallbackThinkingToText({
+      routingModelKey: modelKey,
+      wantThinking,
+      accText: allText,
+      accThinking: allThinking,
+      hasToolCalls: toolCalls.length > 0,
+    })) {
+      log.info(`Chat[non-stream]: thinking-only response from non-reasoning model ${modelKey}; promoting ${allThinking.length}c thinking → content`);
+      allText = allThinking;
+      allThinking = '';
+    }
 
     // Check the cascade back into the pool under the *post-turn* fingerprint
     // so the next request in the same conversation can resume it.
+    //
+    // v2.0.87 (#129 wnfilm): when this request is an auto-fallback retry
+    // (outer wrapper rewrote body.model from the original max → xhigh),
+    // ALSO write the entry under the original modelKey's fingerprint.
+    // The next turn from the client will arrive with the original model
+    // name and would otherwise miss the pool, dropping cascade reuse and
+    // making the model "forget" prior turns for clients that don't
+    // re-send full history each turn.
     if (poolCtx && cascadeMeta?.cascadeId && (allText || toolCalls.length)) {
       const turnComplete = appendAssistantTurn(messages, allText, toolCalls);
       const fpAfter = fingerprintAfter(turnComplete, modelKey, poolCtx.callerKey || '', poolCtx.fpOpts);
+      const aliasModelKey = poolCtx.aliasModelKey;
+      const fpAfterAlias = aliasModelKey && aliasModelKey !== modelKey
+        ? fingerprintAfter(turnComplete, aliasModelKey, poolCtx.callerKey || '', poolCtx.fpOpts)
+        : null;
+      const fingerprints = fpAfterAlias ? [fpAfter, fpAfterAlias] : fpAfter;
       const ttlHint = ttlHintFromCachePolicy(poolCtx.cachePolicy);
       // Explicit 0 (not undefined) clears any inherited 1h hint when the
       // current request didn't ask for it (MED-2). ttlHintFromCachePolicy
       // returns undefined for "no opinion"; pass 0 when we know the user
       // wants the default TTL.
-      poolCheckin(fpAfter, {
+      poolCheckin(fingerprints, {
         cascadeId: cascadeMeta.cascadeId,
         sessionId: cascadeMeta.sessionId,
         lsPort: poolCtx.lsPort,
@@ -1468,7 +2423,19 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     // responses — they're inherently contextual and the cache doesn't
     // preserve the tool_calls array, so a cache hit would return a
     // content-only response with finish_reason:stop, breaking tool flow.
-    if (ckey && !toolCalls.length) cacheSet(ckey, { text: allText, thinking: allThinking });
+    //
+    // v2.0.88 (audit H-3) — when this is the inner-pass of an
+    // auto-fallback retry, ALSO cacheSet under the original-model
+    // ckey (passed as aliasCkey by the outer wrapper). Otherwise the
+    // next identical original-model request misses cache and re-
+    // triggers the rate_limit + fallback cycle, burning cascade
+    // quota for the whole rate-limit window.
+    if (ckey && !toolCalls.length) {
+      cacheSet(ckey, { text: allText, thinking: allThinking });
+      if (aliasCkey && aliasCkey !== ckey) {
+        cacheSet(aliasCkey, { text: allText, thinking: allThinking });
+      }
+    }
 
     const message = { role: 'assistant', content: allText || null };
     if (allThinking) message.reasoning_content = allThinking;
@@ -1496,6 +2463,9 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     // non-reuse requests with `cache_control: { ttl: '1h' }` still attribute
     // their tokens to ephemeral_1h_input_tokens correctly (see #82, #83).
     const usage = buildUsageBody(serverUsage, messages, allText, allThinking, cachePolicy);
+    // v2.0.69 (#118): feed bucket totals into stats so dashboard can show
+    // fresh_input vs cache_read vs cache_write breakdown.
+    try { recordTokenUsage(usage); } catch {}
     const finishReason = toolCalls.length ? 'tool_calls' : 'stop';
     return {
       status: 200,
@@ -1513,15 +2483,44 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     const isInternal = /internal error occurred.*error id/i.test(err.message);
     const isTransport = isCascadeTransportError(err);
     const isTransient = isUpstreamTransientError(err, isInternal);
+    // v2.0.61 (#113): Anthropic / OpenAI content-policy / verification
+    // challenges are NOT transient — rotating accounts won't help and
+    // wastes quota. Detect and short-circuit with a clean 451 + clear
+    // error so clients stop the retry loop. Patterns are conservative:
+    // we only catch unambiguous policy markers, not generic "content
+    // moderation" warnings (which can be retried on a different model).
+    const isPolicyBlocked = /cyber\s*verification|content[\s_-]+policy|policy[\s_-]+(?:violation|blocked|denied)|safety[\s_-]+(?:policy|blocked)|prompt[\s_-]+(?:rejected|blocked)\s+by[\s_-]+policy|usage[\s_-]+policy[\s_-]+violation/i.test(err.message);
     if (isAuthFail) reportError(apiKey);
     if (isRateLimit) { markRateLimited(apiKey, rateLimitCooldownMs(err.message), modelKey); err.isRateLimit = true; err.isModelError = true; err.kind ||= 'model_error'; }
     if (isInternal) { reportInternalError(apiKey); err.isModelError = true; err.kind ||= 'transient_stall'; }
     if (isTransport) { err.isModelError = true; err.kind ||= 'transient_stall'; }
+    if (isPolicyBlocked) { err.isPolicyBlocked = true; err.isModelError = true; err.kind = 'policy_blocked'; }
+    // v2.0.56: ban-shaped error → reportBanSignal handles the 2-strike
+    // promotion to status='banned'. Skip when also a rate-limit so we
+    // don't conflate "out of quota" with "account dead".
+    if (!isRateLimit && looksLikeBanSignal(err.message)) {
+      reportBanSignal(apiKey, err.message);
+      err.isModelError = true; err.kind ||= 'auth_error';
+    }
     if (err.isModelError && err.kind !== 'transient_stall' && !isRateLimit && !isInternal) {
       updateCapability(apiKey, modelKey, false, 'model_error');
     }
     recordRequest(model, false, Date.now() - startTime, apiKey);
     log.error('Chat error:', err.message);
+    // v2.0.61 — policy block surfaces as 451 Unavailable For Legal Reasons,
+    // which is exactly the semantic clients need (the model refuses the
+    // request itself, no retry will help).
+    if (isPolicyBlocked) {
+      return {
+        status: 451,
+        body: {
+          error: {
+            message: `请求被上游 policy 拦截 (${model})。这不是账号问题 — 切账号也救不回来；请改 prompt 或换模型再试。原始上游消息：${err.message.slice(0, 200)}`,
+            type: 'policy_blocked',
+          },
+        },
+      };
+    }
     // Rate limits → 429 with Retry-After; model errors → 403; others → 502
     if (isRateLimit) {
       const rl = isAllRateLimited(modelKey);
@@ -1564,7 +2563,7 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
   }
 }
 
-function streamResponse(id, created, model, modelKey, messages, cascadeMessages, modelEnum, modelUid, useCascade, ckey, emulateTools, toolPreamble, reqId, wantJson = false, callerKey = '', deps = {}) {
+function streamResponse(id, created, model, modelKey, provider, messages, cascadeMessages, modelEnum, modelUid, useCascade, ckey, emulateTools, toolPreamble, reqId, wantJson = false, callerKey = '', deps = {}) {
   const checkMessageRateLimitFn = deps.checkMessageRateLimit || checkMessageRateLimit;
   const waitForAccountFn = deps.waitForAccount || waitForAccount;
   // Cache policy threads through deps because streamResponse is a top-level
@@ -1574,12 +2573,28 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
   // in issues #82 and #83.
   const cachePolicy = deps.cachePolicy || null;
   const fpOpts = deps.fpOpts || { route: 'chat' };
+  // v2.0.55 audit M2: stream parser also needs the request-declared
+  // tools[] to filter out tool_calls whose name isn't on the allowlist.
+  // Same threat model as nonStreamResponse — prompt-injection content
+  // can drive a non-Claude model to emit `<tool_call>{"name":"Bash"}…`
+  // even when the caller only declared `get_weather`.
+  const declaredTools = Array.isArray(deps.tools) ? deps.tools : [];
+  // v2.0.65 (#115) — native tool bridge handles. Stream path consumes the
+  // same shape as nonStreamResponse: `{enabled, allowlist, additionalSteps,
+  // callerLookup, callerTools}`. When enabled, stream emits cascade-native
+  // trajectory steps directly as OpenAI tool_call deltas (the planner is in
+  // DEFAULT mode and proposes view_file / run_command / grep_search_v2 / find
+  // / list_dir as first-class steps, not as <tool_call> markup in text).
+  const nativeOpts = deps.nativeOpts || null;
+  const nativeBridgeOn = !!nativeOpts?.enabled;
   return {
     status: 200,
     stream: true,
     headers: {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      // no-store (not no-cache) so middlebox aggregators like sub2api (#97)
+      // don't priority-cache SSE chunks and replay them for fresh requests.
+      'Cache-Control': 'no-store',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     },
@@ -1691,7 +2706,13 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
       // e.g. a half-read `<tool_call>` tag — can't corrupt the next
       // account's stream. `let` bindings so the retry loop below can
       // reassign.
-      let toolParser = useCascade ? new ToolCallStreamParser({ parseBareJson: emulateTools, parseToolCode: emulateTools }) : null;
+      let toolParser = useCascade ? new ToolCallStreamParser({
+        parseBareJson: emulateTools,
+        parseToolCode: emulateTools,
+        modelKey,
+        provider,
+        route: deps?.route || 'chat',
+      }) : null;
       const collectedToolCalls = [];
 
       // Streaming path sanitizers. Every text/thinking delta flows through a
@@ -1739,6 +2760,39 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
         }
         hadSuccess = true;
 
+        // v2.0.70 — cascade native trajectory tool_call streamed live.
+        // Translate the raw cascade kind name (run_command / view_file)
+        // back into the caller's OpenAI tool name via callerLookup, then
+        // emit as a tool_call delta. Old behaviour batched these at
+        // turn end (release notes for v2.0.65 documented the gap).
+        if (nativeBridgeOn && chunk.nativeToolCall) {
+          const raw = chunk.nativeToolCall;
+          const lookup = nativeOpts?.callerLookup || new Map();
+          const candidates = lookup.get(raw.name) || [];
+          const callerName = candidates[0];
+          if (callerName) {
+            const reverseFn = TOOL_MAP[callerName]?.reverse;
+            let cascadeArgs;
+            try { cascadeArgs = JSON.parse(raw.argumentsJson || '{}'); } catch { cascadeArgs = {}; }
+            let openaiArgs;
+            try { openaiArgs = reverseFn ? reverseFn(cascadeArgs) : cascadeArgs; }
+            catch { openaiArgs = cascadeArgs; }
+            const candidate = {
+              id: raw.id || `call_${collectedToolCalls.length}_${Date.now().toString(36)}`,
+              name: callerName,
+              argumentsJson: JSON.stringify(openaiArgs ?? {}),
+            };
+            const filtered = filterToolCallsByAllowlist([candidate], declaredTools);
+            if (filtered.length) {
+              const tc = sanitizeToolCall(repairToolCallArguments(filtered[0], messages));
+              const idx = collectedToolCalls.length;
+              collectedToolCalls.push(tc);
+              emitToolCallDelta(tc, idx);
+            }
+          }
+          return;
+        }
+
         if (chunk.text) {
           // Pipeline for text deltas:
           //   raw chunk  →  ToolCallStreamParser (strip <tool_call> blocks)
@@ -1755,7 +2809,12 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
                   continue;
                 }
                 if (emulateTools) {
-                  const tc = sanitizeToolCall(repairToolCallArguments(item.toolCall, messages));
+                  // v2.0.55 audit M2: filter against declaredTools allowlist
+                  // before emitting. Empty list → block everything (caller
+                  // didn't declare any tools).
+                  const filtered = filterToolCallsByAllowlist([item.toolCall], declaredTools);
+                  if (!filtered.length) continue;
+                  const tc = sanitizeToolCall(repairToolCallArguments(filtered[0], messages));
                   const idx = collectedToolCalls.length;
                   collectedToolCalls.push(tc);
                   emitToolCallDelta(tc, idx);
@@ -1768,8 +2827,10 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
               // silently discarded. Sanitize server-internal paths out of
               // the emulated call's input too (issue #38) — otherwise Claude
               // Code tries to Read the sandbox path and fails.
-              for (const rawTc of parsed.toolCalls) {
-                if (!emulateTools) continue;
+              const filteredCalls = emulateTools
+                ? filterToolCallsByAllowlist(parsed.toolCalls, declaredTools)
+                : [];
+              for (const rawTc of filteredCalls) {
                 const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
                 const idx = collectedToolCalls.length;
                 collectedToolCalls.push(tc);
@@ -1792,7 +2853,15 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
           // retry. Skip on attempt 0 — already fresh. hadSuccess=true
           // means we already emitted content so no retry happens anyway.
           if (attempt > 0 && !hadSuccess) {
-            if (useCascade) toolParser = new ToolCallStreamParser({ parseBareJson: emulateTools, parseToolCode: emulateTools });
+            if (useCascade) {
+              toolParser = new ToolCallStreamParser({
+                parseBareJson: emulateTools,
+                parseToolCode: emulateTools,
+                modelKey,
+                provider,
+                route: deps?.route || 'chat',
+              });
+            }
             pathStreamText = new PathSanitizeStream();
             pathStreamThinking = new PathSanitizeStream();
           }
@@ -1841,6 +2910,16 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
                   new Error(`${model} 账号队列超时: ${reason}`),
                   { type: (tempUnavail.allUnavailable || rateLimited.allLimited) ? 'rate_limit_exceeded' : 'pool_exhausted' }
                 );
+                // v2.0.84 (#118) — same fallback hint logic as the
+                // non-stream path. Attach after lastErr is set so
+                // the lastErr-presence regression test still passes.
+                if (rateLimited.allLimited || tempUnavail.allUnavailable) {
+                  const fb = pickRateLimitFallback(modelKey || model);
+                  if (fb) {
+                    lastErr.fallback_model = fb;
+                    lastErr.remediation = `池里所有账号在 ${model} 上都已限流。这个 effort 变体上游限频严，建议改用 ${fb}（同基础模型，effort 等级更低）。`;
+                  }
+                }
               }
               break;
             }
@@ -1895,7 +2974,12 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
           try {
             if (useCascade) {
               cascadeResult = await client.cascadeChat(cascadeMessages, modelEnum, modelUid, {
-                onChunk, signal: abortController.signal, reuseEntry, toolPreamble, displayModel: model,
+                onChunk, signal: abortController.signal, reuseEntry,
+                toolPreamble: nativeBridgeOn ? '' : toolPreamble,
+                displayModel: model,
+                nativeMode: nativeBridgeOn,
+                nativeAllowlist: nativeOpts?.allowlist || null,
+                additionalSteps: nativeOpts?.additionalSteps || null,
               });
             } else {
               await client.rawGetChatMessage(messages, modelEnum, modelUid, { onChunk });
@@ -1910,15 +2994,124 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
             if (toolParser) {
               const tail = toolParser.flush();
               if (tail.text) emitContent(pathStreamText.feed(tail.text));
-              for (const rawTc of tail.toolCalls) {
+              // M2 allowlist on the tail flush as well — stream end can
+              // still emit tail tool_calls and they need the same filter.
+              const filteredTail = emulateTools
+                ? filterToolCallsByAllowlist(tail.toolCalls, declaredTools)
+                : [];
+              for (const rawTc of filteredTail) {
                 const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
                 const idx = collectedToolCalls.length;
                 collectedToolCalls.push(tc);
                 emitToolCallDelta(tc, idx);
               }
+              // Diagnostic: same as nonStreamResponse but for the SSE path —
+              // surface why no tool_calls came out when emulation was active.
+              // See nonStreamResponse for marker rationale (#109 sub2api E2E).
+              // v2.0.72 fix: see non-stream comment — combine accText +
+              // accThinking for marker / NLU detection so models that
+              // route narrate output through reasoning_content (GLM-4.7,
+              // some Claude models in thinking mode) don't slip past.
+              const accNarrative = (accText && accText.trim()) ? accText : accThinking;
+              if (emulateTools && collectedToolCalls.length === 0 && accNarrative) {
+                const head = accNarrative.slice(0, 240).replace(/\s+/g, ' ');
+                const markers = [];
+                if (/<tool_call/i.test(accNarrative)) markers.push('xml_tag');
+                if (/```\s*(?:json|tool_call)/i.test(accNarrative)) markers.push('fenced_json');
+                if (/"function"\s*:|"tool_calls"\s*:|"function_call"\s*:/.test(accNarrative)) markers.push('openai_native');
+                if (/\{\s*"name"\s*:\s*"[a-zA-Z0-9_-]+"\s*,\s*"arguments"/.test(accNarrative)) markers.push('bare_json');
+                if (/^\s*(?:I'?ll|I will|Let me|I'?m going to)\s+(?:call|use|invoke|run)/im.test(accNarrative)) markers.push('natural_lang');
+                log.info(`Chat[stream]: emulateTools=true but parser found 0 tool_calls (model=${modelKey} provider=${provider}); markers=${markers.join(',') || 'none'}; head="${head}"`);
+                // v2.0.72 (#115 #120) — NLU intent recovery on stream
+                // tail. If model narrate-d a tool intent without
+                // emitting <tool_call> markup, extract + emit as
+                // tool_call delta so client agent loop doesn't break.
+                //
+                // v2.0.76 (#120 follow-up): widened to fire even when
+                // markers were detected but parser produced 0 calls
+                // (mirrors the non-stream path).
+                if (declaredTools.length > 0) {
+                  const lastUser = latestRealUserText(messages) || '';
+                  const recovered = extractIntentFromNarrative(accNarrative, declaredTools, { lastUserText: lastUser, markers });
+                  if (recovered.length) {
+                    const recoveredCalls = recovered.map((r, i) => ({
+                      id: `nlu_${i}_${Date.now().toString(36)}`,
+                      name: r.name,
+                      argumentsJson: r.argumentsJson,
+                    }));
+                    const filtered = filterToolCallsByAllowlist(recoveredCalls, declaredTools);
+                    for (const rawTc of filtered) {
+                      const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
+                      const idx = collectedToolCalls.length;
+                      collectedToolCalls.push(tc);
+                      emitToolCallDelta(tc, idx);
+                    }
+                    if (filtered.length) {
+                      log.info(`Chat[stream]: NLU recovery — promoted ${filtered.length} narrative tool_call(s) mid-stream (markers=${markers.join(',') || 'none'})`);
+                    }
+                  }
+                }
+                // v2.0.71 (#115) — fabricate detection on stream tail
+                // (only if NLU didn't recover anything).
+                if (markers.length === 0 && collectedToolCalls.length === 0) {
+                  const lastUser = latestRealUserText(messages) || '';
+                  const fab = detectFabricatedToolResult(accNarrative, { lastUserText: lastUser });
+                  if (fab) {
+                    log.warn(`Chat[stream]: fabricate detected — model=${modelKey} pattern=${fab.matchedPattern} sample="${fab.sample}"`);
+                  }
+                }
+              }
             }
             emitContent(pathStreamText.flush());
             emitThinking(pathStreamThinking.flush());
+
+            // v2.0.65 native bridge: cascade trajectory steps come back on
+            // cascadeResult.toolCalls with cascade_native:true. Translate
+            // each into the caller's OpenAI tool name + reverse-mapped
+            // args, allowlist-filter, then emit as tool_call deltas. We do
+            // this at the tail (after pathStreamText flush) rather than
+            // mid-stream because cascadeChat doesn't expose per-step
+            // callbacks for native steps yet — clients see one batched
+            // tool_calls turn instead of fully-streamed deltas. That's a
+            // known gap; trades streaming-grain for shipping a working
+            // bridge first.
+            // v2.0.70 — onChunk now emits cascade native tool_calls
+            // mid-stream (see "Cascade native trajectory tool_call
+            // streamed live" branch above). The batch path here only
+            // catches the tail case where collectedToolCalls is still
+            // empty after stream end (e.g. final-sweep step came late);
+            // dedupe by id so we never emit a tool_call twice.
+            if (nativeBridgeOn && cascadeResult?.toolCalls?.length && collectedToolCalls.length === 0) {
+              const lookup = nativeOpts?.callerLookup || new Map();
+              const nativeRaw = [];
+              for (const raw of cascadeResult.toolCalls) {
+                if (!raw?.cascade_native) continue;
+                const candidates = lookup.get(raw.name) || [];
+                const callerName = candidates[0];
+                if (!callerName) continue;
+                const reverseFn = TOOL_MAP[callerName]?.reverse;
+                let cascadeArgs;
+                try { cascadeArgs = JSON.parse(raw.argumentsJson || '{}'); } catch { cascadeArgs = {}; }
+                let openaiArgs;
+                try { openaiArgs = reverseFn ? reverseFn(cascadeArgs) : cascadeArgs; }
+                catch { openaiArgs = cascadeArgs; }
+                nativeRaw.push({
+                  id: raw.id || `call_${nativeRaw.length}_${Date.now().toString(36)}`,
+                  name: callerName,
+                  argumentsJson: JSON.stringify(openaiArgs ?? {}),
+                });
+              }
+              const filteredNative = filterToolCallsByAllowlist(nativeRaw, declaredTools);
+              for (const rawTc of filteredNative) {
+                const tc = sanitizeToolCall(repairToolCallArguments(rawTc, messages));
+                const idx = collectedToolCalls.length;
+                collectedToolCalls.push(tc);
+                emitToolCallDelta(tc, idx);
+              }
+              if (filteredNative.length === 0 && cascadeResult.toolCalls.some(tc => tc.cascade_native)) {
+                log.info(`Chat[stream]: nativeBridge=true received cascade tool calls but none mapped to caller tools (kinds=${cascadeResult.toolCalls.filter(tc => tc.cascade_native).map(tc => tc.name).join(',')})`);
+              }
+            }
             // Pool check-in on success (cascade only)
             if (reuseEnabled && cascadeResult?.cascadeId && (accText || collectedToolCalls.length)) {
               const turnComplete = appendAssistantTurn(messages, accText, collectedToolCalls);
@@ -1956,6 +3149,25 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
                 accText = cleaned;
               }
             }
+            // GLM5.1 silence fallback (#86 follow-up KLFDan0534) — see
+            // shouldFallbackThinkingToText comment for rationale.
+            // Inside streamResponse the routing key arrives as the
+            // `modelKey` param (caller passes routingModelKey there);
+            // wantThinking comes through deps because body isn't in
+            // scope here (#93 follow-up zhangzhang-bit).
+            if (shouldFallbackThinkingToText({
+              routingModelKey: modelKey,
+              wantThinking: deps.wantThinking,
+              accText,
+              accThinking,
+              hasToolCalls: collectedToolCalls.length > 0,
+            })) {
+              log.info(`Chat[${reqId}]: thinking-only stream from non-reasoning model ${modelKey}; promoting ${accThinking.length}c thinking → content`);
+              send({ id, object: 'chat.completion.chunk', created, model,
+                choices: [{ index: 0, delta: { content: accThinking }, finish_reason: null }] });
+              accText = accThinking;
+              accThinking = '';
+            }
             const finalReason = collectedToolCalls.length ? 'tool_calls' : 'stop';
             // OpenAI spec: the finish_reason chunk carries NO usage, then a
             // separate terminal chunk has empty choices[] + usage
@@ -1965,6 +3177,7 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
               choices: [{ index: 0, delta: {}, finish_reason: finalReason }] });
             {
               const usage = buildUsageBody(cascadeResult?.usage || null, messages, accText, accThinking, cachePolicy);
+              try { recordTokenUsage(usage); } catch {}
               send({ id, object: 'chat.completion.chunk', created, model,
                 choices: [], usage });
             }
@@ -1980,20 +3193,73 @@ function streamResponse(id, created, model, modelKey, messages, cascadeMessages,
             // recover from a "cascade not found" but couldn't. The entry
             // we held is dead — never restore it on the way out.
             if (err.reuseEntryInvalid) reuseEntryDead = true;
+            // #101 (nalayahfowlkest-ship-it): when the upstream model
+            // provider times out mid-stream ("context deadline exceeded"
+            // / "Client.Timeout or context cancellation while reading
+            // body"), the cascade trajectory is left in an inconsistent
+            // state — the assistant never finished, but the prior
+            // tool_result is still in there. Restoring this cascade to
+            // the pool causes the NEXT request to reuse a half-broken
+            // trajectory, and the model only sees the trailing tool
+            // result with no earlier user prompts ("I can see the
+            // content from a previous tool call ... but I don't have
+            // the earlier conversation context").
+            if (/context deadline exceeded|context cancellation while reading body|client\.timeout/i.test(err.message || '')) {
+              reuseEntryDead = true;
+            }
             const isAuthFail = /unauthenticated|invalid api key|invalid_grant|permission_denied.*account/i.test(err.message);
             const isRateLimit = /rate limit|rate_limit|too many requests|quota/i.test(err.message);
             const isInternal = /internal error occurred.*error id/i.test(err.message);
             const isTransport = isCascadeTransportError(err);
             const isTransient = isUpstreamTransientError(err, isInternal);
+            // v2.0.61 (#113) — same policy detection as nonStreamResponse.
+            const isPolicyBlocked = /cyber\s*verification|content[\s_-]+policy|policy[\s_-]+(?:violation|blocked|denied)|safety[\s_-]+(?:policy|blocked)|prompt[\s_-]+(?:rejected|blocked)\s+by[\s_-]+policy|usage[\s_-]+policy[\s_-]+violation/i.test(err.message);
             if (isAuthFail) reportError(currentApiKey);
-            if (isRateLimit) { markRateLimited(currentApiKey, rateLimitCooldownMs(err.message), modelKey); err.isRateLimit = true; err.isModelError = true; err.kind ||= 'model_error'; }
+            if (isRateLimit) { recordRateLimited(); markRateLimited(currentApiKey, rateLimitCooldownMs(err.message), modelKey); err.isRateLimit = true; err.isModelError = true; err.kind ||= 'model_error'; }
+            // v2.0.91 — IP-level rate limit circuit breaker (stream path).
+            // Same logic as non-stream: ≥3 accounts rate-limited for the
+            // same model within 8s → Windsurf is doing IP-wide cooldown,
+            // stop burning accounts and surface immediately.
+            if (isRateLimit && !context.__rlAborted) {
+              if (!context.__rateLimitEvents) context.__rateLimitEvents = [];
+              const RL_WINDOW_MS = 8_000;
+              const RL_BURST_THRESHOLD = 3;
+              const now = Date.now();
+              context.__rateLimitEvents.push({ time: now, model: modelKey, account: acct?.id });
+              const cutoff = now - RL_WINDOW_MS;
+              while (context.__rateLimitEvents.length && context.__rateLimitEvents[0].time < cutoff) {
+                context.__rateLimitEvents.shift();
+              }
+              const sameModelBurst = context.__rateLimitEvents.filter(e => e.model === modelKey);
+              if (sameModelBurst.length >= RL_BURST_THRESHOLD) {
+                context.__rlAborted = true;
+                log.warn(`Chat[${reqId}] stream: IP-rate-limit burst — ${sameModelBurst.length} accounts rate-limited on ${model} within ${RL_WINDOW_MS}ms. Short-circuiting.`);
+                const cooldown = Math.max(...sameModelBurst.map(() => 30_000));
+                lastErr = Object.assign(new Error(`All accounts temporarily rate-limited on ${model}. Windsurf upstream is applying IP-level cooldown. Wait ~${Math.ceil(cooldown / 1000)}s before retrying.`), { type: 'rate_limit_exceeded', retry_after_ms: cooldown });
+                break;
+              }
+            }
             if (isInternal) { reportInternalError(currentApiKey); err.isModelError = true; err.kind ||= 'transient_stall'; }
+            if (isPolicyBlocked) { recordPolicyBlocked(); err.isPolicyBlocked = true; err.isModelError = true; err.kind = 'policy_blocked'; }
             if (isTransport) { err.isModelError = true; err.kind ||= 'transient_stall'; }
+            // v2.0.56 stream-path ban detection — same 2-strike logic as
+            // non-stream. See nonStreamResponse for rationale.
+            if (!isRateLimit && looksLikeBanSignal(err.message)) {
+              reportBanSignal(currentApiKey, err.message);
+              err.isModelError = true; err.kind ||= 'auth_error';
+            }
             if (err.isModelError && err.kind !== 'transient_stall' && !isRateLimit && !isInternal) {
               updateCapability(currentApiKey, modelKey, false, 'model_error');
             }
             if (isRateLimit && strictReuse && checkedOutReuseEntry && fpBefore && checkedOutReuseEntry.apiKey === currentApiKey) {
               log.info(`Chat[${reqId}]: strict reuse preserved cascade after rate limit`);
+              break;
+            }
+            // v2.0.61 (#113): policy refusal isn't account-bound, drop
+            // out of the retry loop immediately and let the SSE error
+            // path emit a 451-style chunk to the client.
+            if (isPolicyBlocked) {
+              log.warn(`Chat[${reqId}] stream: policy_blocked on ${currentApiKey?.slice(0, 12)}..., not retrying`);
               break;
             }
             // Retry only if nothing has been streamed yet AND it's a retryable error

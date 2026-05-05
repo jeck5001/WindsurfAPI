@@ -287,7 +287,7 @@ export function annotateRiskyReadToolResult(content, { toolName = '', isError = 
 
 // ─── OpenAI → Anthropic non-stream response translation ──────
 
-function openAIToAnthropic(result, model, msgId) {
+export function openAIToAnthropic(result, model, msgId) {
   const choice = result.choices?.[0];
   const usage = result.usage || {};
   const content = [];
@@ -341,8 +341,18 @@ function buildAnthropicUsage(usage) {
         ephemeral_1h_input_tokens: usage.cache_creation.ephemeral_1h_input_tokens || 0,
       }
     : { ephemeral_5m_input_tokens: cacheCreationFlat, ephemeral_1h_input_tokens: 0 };
+  // v2.0.68 (#118): Anthropic semantics for input_tokens DIFFER from OpenAI.
+  // OpenAI: prompt_tokens = freshInput + cacheRead (cached_tokens is a subset).
+  // Anthropic: input_tokens = freshInput ONLY; cache_read_input_tokens and
+  //            cache_creation_input_tokens are siblings (mutually exclusive).
+  // The OpenAI prompt_tokens we receive here already follows the OpenAI
+  // convention (chat.js buildUsageBody puts freshInput+cacheRead in
+  // prompt_tokens). To get Anthropic's freshInput we subtract the cached
+  // subset. Negative values clamp to 0 (defensive against upstream skew).
+  const promptTotal = usage.prompt_tokens ?? usage.input_tokens ?? 0;
+  const freshInput = Math.max(0, promptTotal - cacheRead);
   return {
-    input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
+    input_tokens: freshInput,
     output_tokens: usage.completion_tokens || usage.output_tokens || 0,
     cache_creation_input_tokens: cacheCreationFlat,
     cache_read_input_tokens: cacheRead,
@@ -508,6 +518,12 @@ class AnthropicStreamTranslator {
   finish() {
     if (this.messageStopped) return;
     this.messageStopped = true;
+    // Ensure message_start is always sent — when the upstream stream
+    // fails before any content arrives (e.g. cascade immediate error,
+    // new-api timeout), Claude Code still expects a complete event
+    // sequence. Without this, the client sees message_delta + stop
+    // with no preceding start and reports "Content block not found".
+    if (!this.messageStarted) this.startMessage();
     this.closeCurrentBlock();
     const u = this.finalUsage || {};
     this.send('message_delta', {
@@ -674,7 +690,7 @@ export async function handleMessages(body, context = {}) {
     stream: true,
     headers: {
       'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
+      'Cache-Control': 'no-store',
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     },

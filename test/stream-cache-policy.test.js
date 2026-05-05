@@ -93,10 +93,16 @@ test('nonStreamResponse accepts cachePolicy parameter (#82, #83)', () => {
     /async function nonStreamResponse\([^)]*\bcachePolicy\s*=/,
     'nonStreamResponse must accept cachePolicy as an explicit parameter',
   );
-  // Caller must pass cachePolicy as the trailing positional arg.
+  // Caller must pass cachePolicy as a positional arg (after wantJson).
+  // v2.0.36: wantThinking now trails — see #93 follow-up regression fix
+  // where shouldFallbackThinkingToText was leaking a body reference into
+  // a scope where body was undefined.
   assert.match(
     src,
-    /await nonStreamResponse\([\s\S]+?wantJson,\s*cachePolicy,?\s*\)/,
+    // Allow extra positional args (cachePolicy, wantThinking, tools, route ...)
+    // each of which can be a bare identifier or simple expression like
+    // `body.__route || 'chat'`.
+    /await nonStreamResponse\([\s\S]+?wantJson,\s*cachePolicy(?:,\s*[^,)]+)*,?\s*\)/,
     'handleChatCompletions must pass cachePolicy when invoking nonStreamResponse',
   );
 });

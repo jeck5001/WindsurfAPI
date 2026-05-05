@@ -1411,9 +1411,38 @@ tbody tr:hover td { background: var(--surface-2); }
 .contributor-card .summary-toggle summary:hover { color: var(--accent); }
 .contributor-card .summary { font-size: 13px; color: var(--text-muted); line-height: 1.65; margin-top: 6px; }
 .contributor-card .rarity-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 38px; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 800; letter-spacing: 0.7px; font-family: var(--font-mono, ui-monospace, monospace); line-height: 1.5; }
+/* v2.0.60 — extended rarity ladder. Rarer = more dramatic visual:
+   GOD glows with animated rainbow (project creator only); MR pulses cyan;
+   LR has a cool prism gradient; UR keeps the existing fire palette. */
+.contributor-card .rarity-GOD {
+  background: linear-gradient(110deg, #ffd700 0%, #ff6b9d 25%, #c084fc 50%, #60a5fa 75%, #34d399 100%);
+  background-size: 220% 220%;
+  color: #1a1208;
+  text-shadow: 0 0 6px rgba(255,255,255,0.55);
+  font-weight: 900;
+  box-shadow: 0 0 0 1px rgba(255,215,0,0.55), 0 0 14px rgba(192,132,252,0.4);
+  animation: rarity-god-pulse 4s ease-in-out infinite;
+}
+@keyframes rarity-god-pulse {
+  0%, 100% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+}
+.contributor-card .rarity-MR {
+  background: linear-gradient(135deg, #06b6d4 0%, #8b5cf6 50%, #ec4899 100%);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 0 0 1px rgba(139,92,246,0.45), 0 0 10px rgba(6,182,212,0.25);
+}
+.contributor-card .rarity-LR {
+  background: linear-gradient(135deg, #a855f7 0%, #6366f1 50%, #06b6d4 100%);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 0 0 1px rgba(99,102,241,0.42);
+}
 .contributor-card .rarity-UR { background: linear-gradient(135deg, #f5d06f, #e11d48 52%, #7c3aed); color: #fff; box-shadow: 0 0 0 1px rgba(225,29,72,0.28); }
 .contributor-card .rarity-SSR { background: linear-gradient(135deg, #f59e0b, #b45309); color: #fff7ed; box-shadow: 0 0 0 1px rgba(180,83,9,0.25); }
 .contributor-card .rarity-SR { background: var(--info-soft); color: var(--info); border: 1px solid rgba(59,130,246,0.28); }
+.contributor-card .rarity-R { background: var(--surface-2); color: var(--text-muted); border: 1px solid var(--border); }
 .contributor-card .contribution-count { font-size: 11px; color: var(--text-dim); padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; line-height: 1.5; }
 .contributor-card .history-list { list-style: none; padding: 0; margin: 6px 0 0; display: flex; flex-direction: column; gap: 8px; }
 .contributor-card .history-item { padding: 10px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface-2); }
@@ -1557,13 +1586,20 @@ window._firebaseOAuth = async function(provider) {
           <div class="section-title" data-i18n="section.lsStatus.title">Language Server</div>
           <div class="section-desc" data-i18n="section.lsStatus.desc">语言服务器实例状态</div>
         </div>
-        <button class="btn btn-outline btn-sm" onclick="App.restartLs()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-          <span data-i18n="action.restart">重启</span>
-        </button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="App.updateLsBinary()" title="Download latest language_server binary and restart pool">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <span data-i18n="action.updateLsBinary">更新 LS</span>
+          </button>
+          <button class="btn btn-outline btn-sm" onclick="App.restartLs()">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            <span data-i18n="action.restart">重启</span>
+          </button>
+        </div>
       </div>
       <div class="section-body">
         <div id="ls-status"></div>
+        <div id="ls-binary-info" style="margin-top:12px;font-size:12px;color:var(--text-muted)"></div>
       </div>
     </div>
   </section>
@@ -1733,6 +1769,13 @@ window._firebaseOAuth = async function(provider) {
         </button>
       </div>
     </div>
+    <!-- v2.0.57 Fix 5 — drought mode banner: shown only when every active
+         account has weekly% < 5. Hidden by default; loadDrought() flips it. -->
+    <div id="drought-banner" class="banner banner-warn" style="display:none;margin:0 0 16px;padding:14px 18px;border-radius:var(--radius);background:#fff7e6;border:1px solid #ffd591;color:#874d00">
+      <strong data-i18n="drought.title">配额预警：</strong>
+      <span id="drought-message" data-i18n="drought.body">所有账号本周配额都低于阈值，建议补账号或等待重置</span>
+      <span id="drought-detail" class="text-sm text-muted" style="margin-left:8px"></span>
+    </div>
 
     <div class="section">
       <div class="section-header">
@@ -1773,8 +1816,9 @@ window._firebaseOAuth = async function(provider) {
         <div class="field-hint" style="margin-top:4px" data-i18n="field.proxy.hint">留空则使用全局代理设置</div>
         <div class="field-row-actions">
           <button class="btn btn-primary" onclick="App.addAccount()" data-i18n="action.add">添加账号</button>
-          <button class="btn btn-outline" onclick="App.discoverLocalWindsurf()" data-i18n="action.importLocal" title="从本地 Windsurf 客户端读取已登录的凭证（仅本机访问）">从本地 Windsurf 导入</button>
+          <button id="local-import-btn" class="btn btn-outline" onclick="App.discoverLocalWindsurf()" data-i18n="action.importLocal" title="从本地 Windsurf 客户端读取已登录的凭证（仅本机访问）">从本地 Windsurf 导入</button>
         </div>
+        <div id="local-import-hint" style="margin-top:8px;color:var(--text-muted);font-size:12px;line-height:1.6"></div>
         <div id="local-windsurf-result" style="margin-top:12px"></div>
       </div>
     </div>
@@ -1957,6 +2001,19 @@ window._firebaseOAuth = async function(provider) {
         <span data-i18n="field.autoScroll">自动滚动</span>
       </label>
       <button class="btn btn-outline btn-sm" onclick="App.clearLogView()" data-i18n="log.clearView">清空视图</button>
+      <!-- v2.0.60 — log export. Type select drives which slice to dump
+           (api requests vs system housekeeping vs both); format selects
+           machine-readable jsonl vs human-readable txt. -->
+      <select id="log-export-type" class="select" style="width:130px">
+        <option value="all" data-i18n="log.export.all">全部日志</option>
+        <option value="api" data-i18n="log.export.api">API 请求日志</option>
+        <option value="system" data-i18n="log.export.system">系统运行日志</option>
+      </select>
+      <select id="log-export-format" class="select" style="width:120px">
+        <option value="jsonl">JSONL</option>
+        <option value="txt" data-i18n="log.export.txt">纯文本</option>
+      </select>
+      <button class="btn btn-primary btn-sm" onclick="App.exportLogs()" data-i18n="log.export.btn">下载日志</button>
     </div>
     <div class="log-container" id="log-container"></div>
   </section>
@@ -2165,12 +2222,90 @@ window._firebaseOAuth = async function(provider) {
     </div>
     <div class="section" style="margin-top:24px">
       <div class="section-header">
+        <div class="section-title" data-i18n="section.droughtRestrict.title">配额低水位时屏蔽 premium 模型</div>
+      </div>
+      <div class="section-body">
+        <div class="section-desc" style="margin-bottom:12px" data-i18n="section.droughtRestrict.desc">所有账号本周配额都低于 5% 时，对 premium 模型（claude-opus / claude-sonnet 等）请求直接返 503，避免上游 rate-limit 烧最后一点配额。免费层模型（gemini-2.5-flash 等）保持可用。关闭后即使在 drought mode 也照常下发，accept 上游可能立即 429。</div>
+        <div style="display:flex;align-items:center;gap:16px;padding:12px;background:var(--surface-2);border-radius:var(--radius)">
+          <label class="switch">
+            <input type="checkbox" id="exp-drought-restrict" onchange="App.toggleExperimental('droughtRestrictPremium', this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+          <div>
+            <div style="font-weight:500" data-i18n="section.droughtRestrict.enable">启用 drought-mode premium 屏蔽</div>
+            <div class="text-sm text-muted" data-i18n="section.droughtRestrict.hint">默认开启。drought 状态由账号池自动判定（GET /dashboard/api/drought 看实时值）。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- v2.0.70 (#112 follow-up): quiet-window auto-update toggle. -->
+    <div class="section" style="margin-top:24px">
+      <div class="section-header">
+        <div class="section-title" data-i18n="section.quietWindow.title">空档自动更新</div>
+      </div>
+      <div class="section-body">
+        <div class="section-desc" style="margin-bottom:12px" data-i18n="section.quietWindow.desc">每分钟看一次最近 5 分钟内的请求量，连续在阈值以下就自动 docker compose pull + recreate。冷启动 10 分钟内不动；成功后 24 小时冷却；失败不冷却。需要 /var/run/docker.sock 挂进容器（默认 docker-compose 已挂）。</div>
+        <div style="display:flex;align-items:center;gap:16px;padding:12px;background:var(--surface-2);border-radius:var(--radius)">
+          <label class="switch">
+            <input type="checkbox" id="exp-quiet-window" onchange="App.toggleExperimental('autoUpdateQuietWindow', this.checked)">
+            <span class="switch-slider"></span>
+          </label>
+          <div>
+            <div style="font-weight:500" data-i18n="section.quietWindow.enable">启用空档自动更新</div>
+            <div class="text-sm text-muted" data-i18n="section.quietWindow.hint">默认关闭。当前状态：<span id="quiet-window-status">加载中…</span></div>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px">
+            <button class="btn btn-ghost btn-sm" onclick="App.loadQuietWindowStatus()" data-i18n="action.refresh">刷新</button>
+            <button class="btn btn-outline btn-sm" onclick="App.runQuietWindowNow()" data-i18n="action.runNow">立即测试</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="section" style="margin-top:24px">
+      <div class="section-header">
         <div>
           <div class="section-title" data-i18n="section.systemPrompts.title">系统提示词</div>
           <div class="section-desc" data-i18n="section.systemPrompts.desc">工具注入、对话模式等内置提示词模板。修改后立即生效，点"重置"恢复默认。</div>
         </div>
       </div>
       <div class="section-body" id="system-prompts-editor" style="display:grid;gap:14px"></div>
+    </div>
+    <div class="section" style="margin-top:24px">
+      <div class="section-header">
+        <div>
+          <div class="section-title" data-i18n="section.credentials.title">凭证管理</div>
+          <div class="section-desc" data-i18n="section.credentials.desc">运行时改 API_KEY 和 Dashboard 密码，写入 runtime-config.json 立即生效，不用重启容器或重读 .env。改完之后下一次请求需要用新值；当前会话会要求重新登录。</div>
+        </div>
+      </div>
+      <div class="section-body" style="display:grid;gap:14px">
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);display:grid;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong data-i18n="credentials.apiKey">API_KEY</strong>
+            <span class="text-sm text-muted" id="credentials-apikey-source"></span>
+            <span class="text-sm" style="font-family:monospace" id="credentials-apikey-masked"></span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="password" class="input" id="credentials-apikey-input" data-i18n-placeholder="credentials.apiKeyPlaceholder" placeholder="新 API_KEY（≥ 8 字符；留空清除运行时覆盖）" style="flex:1;min-width:240px">
+            <button class="btn btn-outline btn-sm" onclick="App.toggleApiKeyVisibility()" data-i18n="credentials.show">显示/隐藏</button>
+            <button class="btn btn-primary btn-sm" onclick="App.saveCredential('apiKey')" data-i18n="credentials.save">保存</button>
+          </div>
+          <div class="text-sm text-muted" data-i18n="credentials.apiKeyHint">改完后所有 chat 客户端要换成新 KEY；旧 KEY 立即失效。</div>
+        </div>
+        <div style="padding:12px;background:var(--surface-2);border-radius:var(--radius);display:grid;gap:8px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <strong data-i18n="credentials.dashboardPassword">Dashboard 密码</strong>
+            <span class="text-sm text-muted" id="credentials-dashboardpw-source"></span>
+            <span class="text-sm" id="credentials-dashboardpw-status"></span>
+          </div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <input type="password" class="input" id="credentials-dashboardpw-input" data-i18n-placeholder="credentials.dashboardPwPlaceholder" placeholder="新 Dashboard 密码（≥ 8 字符；留空清除运行时覆盖）" style="flex:1;min-width:240px">
+            <button class="btn btn-outline btn-sm" onclick="App.toggleDashboardPwVisibility()" data-i18n="credentials.show">显示/隐藏</button>
+            <button class="btn btn-primary btn-sm" onclick="App.saveCredential('dashboardPassword')" data-i18n="credentials.save">保存</button>
+          </div>
+          <div class="text-sm text-muted" data-i18n="credentials.dashboardPwHint">用 scrypt 派生哈希存盘；改完之后会自动登出当前会话，需要用新密码重登。</div>
+        </div>
+        <div class="text-sm text-muted" data-i18n="credentials.bruteForceHint">为防暴破：同一 IP 连续 5 次 dashboard 登录失败会被锁 30 分钟（2.0.56 起）。</div>
+      </div>
     </div>
     <div class="section" style="margin-top:24px">
       <div class="section-header">
@@ -2244,10 +2379,19 @@ const I18n = {
     }
     // Fallback to key if not found
     if (typeof val !== 'string') {
-      // Try embedded default (for zh-CN, use text from HTML)
-      if (code === 'zh-CN') {
-        const el = document.querySelector(`[data-i18n="${key}"]`);
-        if (el?.dataset.i18nOrig) return el.dataset.i18nOrig;
+      // Try embedded default (for zh-CN, use text from HTML).
+      // The DOM lookup is only meaningful when the key is a real dotted
+      // i18n identifier (alnum + dot + underscore). A backend error
+      // message accidentally passed as a key — e.g. `error.docker API
+      // POST /containers/create -> 404: {"message":"..."}` — would blow
+      // up `querySelector` because `"` and `{` are CSS-selector syntax.
+      // Guard with CSS.escape AND a sanity charset check so we never
+      // throw out of the i18n resolver.
+      if (code === 'zh-CN' && /^[A-Za-z0-9_.-]+$/.test(key)) {
+        try {
+          const el = document.querySelector(`[data-i18n="${CSS.escape(key)}"]`);
+          if (el?.dataset.i18nOrig) return el.dataset.i18nOrig;
+        } catch { /* selector still rejected — give up and return the key */ }
       }
       return key;
     }
@@ -2350,6 +2494,15 @@ const App = {
     I18n.apply();
   },
 
+  // Centralized error i18n: translate `error.<code>` from server, fall back to
+  // the literal message or a localized default. Replaces 6+ inline
+  // `error.${err.message}` lookups across the dashboard (PR #92, smeinecke).
+  translateError(errorCode, fallbackKey = 'error.unknown') {
+    const errKey = errorCode ? `error.${errorCode}` : '';
+    if (errKey && I18n.t(errKey) !== errKey) return I18n.t(errKey);
+    return errorCode || I18n.t(fallbackKey);
+  },
+
   async toggleLang() {
     const newLang = I18n.locale === 'zh' || I18n.locale === 'zh-CN' ? 'en' : 'zh';
     await I18n.setLocale(newLang);
@@ -2386,6 +2539,38 @@ const App = {
     await I18n.init();
     this.lang = I18n.locale === 'zh-CN' ? 'zh' : 'en';
     const auth = await this.api('GET', '/auth');
+    // v2.0.61 (#110): when DASHBOARD_PASSWORD isn't configured AND we're
+    // bound to a public host, the backend returns `locked:true`. Show a
+    // dedicated message instead of a useless password prompt the user
+    // can't possibly satisfy. Without this hint operators land here from
+    // a fresh `docker compose up` and think the dashboard is broken.
+    if (auth.locked) {
+      const overlay = document.getElementById('login-overlay');
+      const pwEl = document.getElementById('login-password');
+      const btnEl = document.getElementById('login-btn');
+      const errEl = document.getElementById('login-error');
+      overlay.classList.remove('hidden');
+      if (pwEl) pwEl.style.display = 'none';
+      if (btnEl) btnEl.style.display = 'none';
+      if (errEl) {
+        errEl.style.color = 'var(--text-muted)';
+        errEl.style.fontSize = '13px';
+        errEl.style.lineHeight = '1.65';
+        errEl.style.textAlign = 'left';
+        errEl.innerHTML = `
+          <strong style="color:var(--warn);display:block;margin-bottom:8px">${I18n.t('login.lockedTitle') || 'Dashboard locked'}</strong>
+          <div>${I18n.t('login.lockedDesc') || 'Server bound to public host without DASHBOARD_PASSWORD. v2.0.55 fail-closed: API_KEY no longer doubles as the dashboard password.'}</div>
+          <div style="margin-top:10px">${I18n.t('login.lockedFix') || 'Fix:'}</div>
+          <pre style="background:var(--surface-2);padding:10px;border-radius:6px;font-size:12px;margin-top:6px;white-space:pre-wrap"># .env
+DASHBOARD_PASSWORD=YOUR_STRONG_PASSWORD
+
+# restart container
+docker compose up -d --force-recreate</pre>
+          <div style="margin-top:8px;font-size:12px">${I18n.t('login.lockedDocs') || 'See'} <a href="https://github.com/dwgx/WindsurfAPI/blob/master/docs/releases/RELEASE_NOTES_2.0.55.md" target="_blank" style="color:var(--accent)">v2.0.55 release notes</a>.</div>
+        `;
+      }
+      return;
+    }
     if (auth.required && !auth.valid) {
       document.getElementById('login-overlay').classList.remove('hidden');
       return;
@@ -2564,6 +2749,28 @@ const App = {
   },
 
   // ─── Overview ────────────────────────────────
+  showSelfUpdateUnavailable(status, apply, response) {
+    // The standard hint always works (run `docker compose pull && up -d`
+    // on the host). When docker mode also reported a reason — e.g. the
+    // user has docker.sock mounted but the container wasn't started by
+    // compose — surface that detail too so they know how to opt in.
+    const dockerHintParts = [];
+    if (response && response.dockerReason && response.dockerReason !== 'no-docker-sock') {
+      dockerHintParts.push(I18n.t('status.dockerSelfUpdateBlocked', {
+        reason: this.esc(response.dockerReason),
+        detail: this.esc(response.dockerDetail || ''),
+      }));
+    }
+    status.innerHTML = `
+      <div style="color:var(--warning,#f59e0b);font-weight:600;margin-bottom:4px">${I18n.t('status.selfUpdateUnavailable')}</div>
+      <div class="text-sm text-muted">${I18n.t('status.selfUpdateDockerHint')}</div>
+      ${dockerHintParts.join('')}`;
+    if (apply) {
+      apply.classList.add('hidden');
+      apply.disabled = true;
+    }
+  },
+
   async checkUpdate() {
     const btn = document.getElementById('btn-check-update');
     const status = document.getElementById('update-status');
@@ -2574,6 +2781,10 @@ const App = {
     try {
       const r = await this.api('GET', '/self-update/check');
       if (!r.ok) {
+        if (r.error === 'ERR_SELF_UPDATE_UNAVAILABLE') {
+          this.showSelfUpdateUnavailable(status, apply, r);
+          return;
+        }
         if (/not a git repository/i.test(r.error || '')) {
           status.innerHTML = `
             <div style="color:var(--warning,#f59e0b);font-weight:600;margin-bottom:4px">${I18n.t('status.notGitRepo')}</div>
@@ -2581,8 +2792,24 @@ const App = {
           apply.classList.add('hidden');
           return;
         }
-        throw new Error(r.error || I18n.t('error.apiError'));
+        throw new Error(this.translateError(r.error, 'error.apiError'));
       }
+      if (r.mode === 'docker') {
+        // Git mode unavailable but docker.sock is mounted — backend will
+        // pull the image and spawn a deployer sidecar to recreate this
+        // container in place. Show a "ready to apply" prompt instead of
+        // the git diff card.
+        status.innerHTML = `
+          <div style="color:var(--accent);font-weight:600;margin-bottom:6px">${I18n.t('status.dockerReady')}</div>
+          <div class="text-sm" style="display:grid;gap:3px">
+            <div>${I18n.t('status.dockerImage')} <code>${this.esc(r.image || '')}</code></div>
+            <div>${I18n.t('status.dockerProject')} <code>${this.esc(r.project || '')}</code></div>
+          </div>`;
+        apply.classList.remove('hidden');
+        apply.dataset.mode = 'docker';
+        return;
+      }
+      apply.dataset.mode = 'git';
       if (r.behind) {
         status.innerHTML = `
           <div style="color:var(--accent);font-weight:600;margin-bottom:6px">${I18n.t('status.updateAvailable')}</div>
@@ -2625,7 +2852,33 @@ const App = {
         }
         r = await this.api('POST', '/self-update', { forceReset: true });
       }
-      if (!r.ok) throw new Error(r.error || I18n.t('error.updateFailed'));
+      if (r.mode === 'docker') {
+        if (!r.ok) {
+          // r.reason is the short stable code ("deployer-pull-failed",
+          // "deployer-create-failed", etc.) and the only thing we can
+          // map to a localized i18n key. r.detail is the raw upstream
+          // error string — long, unstable, often containing characters
+          // that explode CSS selectors if treated as an i18n key. Show
+          // reason as the localized message; show detail underneath
+          // for debugging.
+          const localized = this.translateError(r.reason, 'error.updateFailed');
+          const msg = r.detail ? `${localized} — ${r.detail}` : localized;
+          throw new Error(msg);
+        }
+        const delaySec = r.delaySeconds || 8;
+        status.innerHTML = `
+          <div style="color:var(--success);font-weight:600;margin-bottom:6px">${I18n.t('status.dockerUpdating', { image: this.esc(r.image || ''), delay: delaySec })}</div>
+          <div class="text-sm text-muted">${I18n.t('status.dockerSidecarStarted', { id: this.esc(r.deployerId || '') })}</div>`;
+        setTimeout(() => location.reload(), (delaySec + 4) * 1000);
+        return;
+      }
+      if (!r.ok) {
+        if (r.error === 'ERR_SELF_UPDATE_UNAVAILABLE') {
+          this.showSelfUpdateUnavailable(status, apply, r);
+          return;
+        }
+        throw new Error(this.translateError(r.error, 'error.updateFailed'));
+      }
       if (r.changed) {
         status.innerHTML = `
           <div style="color:var(--success);font-weight:600;margin-bottom:6px">${I18n.t('status.updateComplete', { before: this.esc(r.before), after: this.esc(r.after) })}</div>
@@ -2720,6 +2973,7 @@ const App = {
         <span class="badge ${ls.running ? 'running' : 'stopped'}">${I18n.t(ls.running ? 'card.languageServer.running' : 'card.languageServer.stopped')}</span>
         <span class="text-sm text-muted" style="margin-left:12px">PID ${ls.pid || '-'} · ${I18n.t('field.port.label')} ${ls.port || '-'} · ${I18n.t('card.restarts')} ${ls.restartCount || 0}</span>
       `;
+      this.loadLsBinary();
     }
     this.poll('overview', () => this.loadOverview(), 15000);
   },
@@ -2731,8 +2985,72 @@ const App = {
     this.toast(I18n.t('toast.restarting'), 'info');
   },
 
+  async loadLsBinary() {
+    const el = document.getElementById('ls-binary-info');
+    if (!el) return;
+    try {
+      const r = await this.api('GET', '/langserver/binary');
+      if (!r.ok) {
+        const msg = I18n.t('toast.lsBinaryUnreadable', { error: r.error || 'unknown' });
+        el.innerHTML = `<span style="color:var(--text-error,#ef4444)">${msg}</span> · <code style="font-family:monospace">${r.path || ''}</code>`;
+        return;
+      }
+      const sizeMb = (r.sizeBytes / (1024 * 1024)).toFixed(1);
+      const age = Math.floor((Date.now() - new Date(r.mtime).getTime()) / 86400000);
+      el.textContent = I18n.t('toast.lsBinaryStat', { path: r.path, sizeMb, sha: r.sha256, age });
+    } catch (e) {
+      el.textContent = I18n.t('toast.lsBinaryReadFailed', { error: e.message });
+    }
+  },
+
+  async updateLsBinary() {
+    const ok = await this.confirm(
+      I18n.t('confirm.updateLsTitle'),
+      I18n.t('confirm.updateLsDesc'),
+      { danger: false, okText: I18n.t('confirm.updateLsButton') },
+    );
+    if (!ok) return;
+    this.toast(I18n.t('toast.lsBinaryUpdating'), 'info');
+    try {
+      const r = await this.api('POST', '/langserver/update', {});
+      if (r.ok) {
+        // Three meaningfully-different outcomes; collapsing them into one
+        // "restarted N instances" toast was the source of "LS update has
+        // no effect" reports — restarted=0 alone can't tell a user
+        // whether nothing happened, the binary was already current, or
+        // the live pool was just cold.
+        const errs = (r.restartErrors || []).length;
+        let msgKey, vars;
+        if (!r.binaryChanged && r.beforeSha) {
+          msgKey = 'toast.lsBinaryAlreadyCurrent';
+          vars = { sha: r.beforeSha };
+        } else if (errs) {
+          msgKey = 'toast.lsBinaryUpdatedWithErrors';
+          vars = { count: r.restarted, errors: errs, before: r.beforeSha || '?', after: r.afterSha || '?' };
+        } else if (r.poolEmpty) {
+          msgKey = 'toast.lsBinaryUpdatedColdPool';
+          vars = { before: r.beforeSha || '?', after: r.afterSha || '?' };
+        } else {
+          msgKey = 'toast.lsBinaryUpdated';
+          vars = { count: r.restarted, before: r.beforeSha || '?', after: r.afterSha || '?' };
+        }
+        this.toast(I18n.t(msgKey, vars), 'success');
+        if (this.loadLsBinary) await this.loadLsBinary();
+      } else {
+        this.toast(I18n.t('toast.lsBinaryUpdateFailed', { error: r.error || r.stderr || 'unknown' }), 'error');
+      }
+    } catch (e) {
+      this.toast(I18n.t('toast.lsBinaryUpdateRequestFailed', { error: e.message }), 'error');
+    }
+  },
+
   // ─── Windsurf Login ──────────────────────────
-  loadWindsurfLogin() { this.renderLoginHistory(); },
+  loadWindsurfLogin() {
+    this.renderLoginHistory();
+    // v2.0.60 — preflight local-windsurf availability so the import
+    // button reflects the truth (disabled + hint on public bind).
+    this.checkLocalImportAvailability();
+  },
 
   async oauthLogin(provider) {
     const btn = document.getElementById(`oauth-${provider}-btn`);
@@ -2854,10 +3172,10 @@ const App = {
         input.value = '';
         this.loadAccounts();
       } else {
-        this.toast(r.error || I18n.t('toast.addFailed'), 'error');
+        this.toast(this.translateError(r.error, 'toast.addFailed'), 'error');
       }
     } catch (err) {
-      this.toast(err.message, 'error');
+      this.toast(this.translateError(err.message, 'error.unknown'), 'error');
     } finally {
       if (btn) btn.disabled = originalDisabled || false;
     }
@@ -3084,6 +3402,9 @@ const App = {
 
   // ─── Accounts ────────────────────────────────
   async loadAccounts() {
+    // v2.0.57 Fix 5 — refresh drought banner alongside accounts so a low
+    // pool state shows up the moment the user opens the panel.
+    this.loadDrought();
     const [d, ov] = await Promise.all([
       this.api('GET', '/accounts'),
       this.api('GET', '/overview').catch(() => null),
@@ -3197,12 +3518,18 @@ const App = {
           const noData = pct == null;
           const v = noData ? 0 : Math.max(0, Math.min(100, pct));
           const c = noData ? 'var(--text-dim)' : barColor(v);
-          return `<div style="display:flex;align-items:center;gap:3px;margin-top:2px" title="${detail || (noData ? 'N/A' : '')}">
+          // v2.0.75 (#123 wnfilm): when upstream did not return the
+          // bucket (dailyPercent=null but weeklyPercent has a value)
+          // the bar previously read "--%" with a faint trough — easy
+          // to mistake for a refresh failure. Print "N/A" with a
+          // dashed bar so it's visually distinct from a 0% / failure
+          // state, and mirror the explanation into the tooltip.
+          return `<div style="display:flex;align-items:center;gap:3px;margin-top:2px" title="${detail}">
             <span class="text-xs" style="width:14px;flex-shrink:0;color:var(--text-dim);font-size:10px;font-weight:600">${label}</span>
-            <div style="flex:1;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;min-width:40px">
+            <div style="flex:1;height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden;min-width:40px${noData ? ';outline:1px dashed var(--text-dim);outline-offset:-1px' : ''}">
               <div style="height:100%;width:${noData ? 0 : v}%;background:${c};border-radius:2px;transition:width .4s ease"></div>
             </div>
-            <span class="text-xs" style="width:28px;text-align:right;color:${c};font-size:10px">${noData ? '--' : v.toFixed(0)+'%'}</span>
+            <span class="text-xs" style="width:28px;text-align:right;color:${c};font-size:10px;font-style:${noData ? 'italic' : 'normal'}">${noData ? 'N/A' : v.toFixed(0)+'%'}</span>
           </div>`;
         };
         const fmtReset = (unix) => unix ? new Date(unix * 1000).toLocaleString() : I18n.t('creditsBar.noResetTime');
@@ -3433,7 +3760,7 @@ const App = {
         this.toast(I18n.t('toast.credits.refreshed'));
         this.loadAccounts();
       } else {
-        this.toast(r.error || I18n.t('toast.credits.refreshFailed'), 'error');
+        this.toast(this.translateError(r.error, 'toast.credits.refreshFailed'), 'error');
       }
     } catch (e) { this.toast(I18n.t('toast.credits.refreshFailed') + ': ' + e.message, 'error'); }
   },
@@ -3448,7 +3775,7 @@ const App = {
         this.toast(I18n.t('toast.credits.allRefreshed', { ok: okCount, fail: failCount }));
         this.loadAccounts();
       } else {
-        this.toast(r.error || I18n.t('toast.credits.refreshFailed'), 'error');
+        this.toast(this.translateError(r.error, 'toast.credits.refreshFailed'), 'error');
       }
     } catch (e) { this.toast(I18n.t('toast.credits.refreshFailed') + ': ' + e.message, 'error'); }
   },
@@ -3463,7 +3790,7 @@ const App = {
         this.toast(I18n.t('toast.probeAllComplete', { summary }));
         this.loadAccounts();
       } else {
-        this.toast(r.error || I18n.t('error.probeFailed'), 'error');
+        this.toast(this.translateError(r.error, 'error.probeFailed'), 'error');
       }
     } catch (e) { this.toast(I18n.t('error.probeFailed') + ': ' + e.message, 'error'); }
   },
@@ -3477,7 +3804,7 @@ const App = {
         this.toast(I18n.t('toast.probeComplete', { tier: tierLabel[r.tier] || r.tier }));
         this.loadAccounts();
       } else {
-        this.toast(r.error || I18n.t('error.probeFailed'), 'error');
+        this.toast(this.translateError(r.error, 'error.probeFailed'), 'error');
       }
     } catch (e) { this.toast(I18n.t('error.probeFailed') + ': ' + e.message, 'error'); }
   },
@@ -3603,7 +3930,7 @@ const App = {
           root.remove();
           self.loadAccounts();
         } else {
-          self.toast(r.error || I18n.t('error.saveFailed'), 'error');
+          self.toast(self.translateError(r.error, 'error.saveFailed'), 'error');
           okBtn.disabled = false; cancelBtn.disabled = false; okBtn.textContent = I18n.t('action.save');
         }
       } catch (e) {
@@ -3638,7 +3965,70 @@ const App = {
     const body = type === 'api_key' ? { api_key: key, label, proxy } : { token: key, label, proxy };
     const r = await this.api('POST', '/accounts', body);
     if (r.success) { this.toast(I18n.t('account.addSuccess')); document.getElementById('acc-key').value = ''; document.getElementById('acc-label').value = ''; document.getElementById('acc-proxy').value = ''; this.loadAccounts(); }
-    else this.toast(r.error || I18n.t('toast.addFailed'), 'error');
+    else this.toast(this.translateError(r.error, 'toast.addFailed'), 'error');
+  },
+
+  // v2.0.60 — preflight the local-windsurf availability so the dashboard
+  // doesn't surface a confusing 403 ERR_LOCAL_IMPORT_NOT_AVAILABLE_PUBLIC_BIND
+  // after the user clicks. Called from loadWindsurfLogin() / on panel
+  // open. Disables the button + shows a friendly hint when unavailable.
+  async checkLocalImportAvailability() {
+    const btn = document.getElementById('local-import-btn');
+    const hint = document.getElementById('local-import-hint');
+    if (!btn) return;
+    try {
+      const a = await this.api('GET', '/accounts/import-local-availability');
+      if (a.available) {
+        btn.disabled = false;
+        btn.classList.remove('disabled');
+        if (hint) hint.textContent = '';
+        return;
+      }
+      btn.disabled = true;
+      btn.classList.add('disabled');
+      if (hint) {
+        hint.textContent = a.hint || I18n.t('localImport.unavailable');
+        hint.style.color = 'var(--text-muted)';
+        hint.style.fontSize = '12px';
+        hint.style.lineHeight = '1.6';
+      }
+    } catch (e) {
+      // If the new endpoint isn't there, leave the button as-is so older
+      // backends still work.
+    }
+  },
+
+  async exportLogs() {
+    const type = document.getElementById('log-export-type')?.value || 'all';
+    const fmt = document.getElementById('log-export-format')?.value || 'jsonl';
+    const level = document.getElementById('log-level')?.value || '';
+    try {
+      const params = new URLSearchParams({ type, format: fmt });
+      if (level) params.set('level', level);
+      const url = '/dashboard/api/logs/export?' + params.toString();
+      // Use fetch + blob so we can pass the X-Dashboard-Password header
+      // (raw <a download> can't set headers).
+      const resp = await fetch(url, {
+        headers: { 'X-Dashboard-Password': sessionStorage.getItem('dashboard_password') || '' },
+      });
+      if (!resp.ok) {
+        this.toast(I18n.t('toast.exportFailed') + ': HTTP ' + resp.status, 'error');
+        return;
+      }
+      const blob = await resp.blob();
+      const cd = resp.headers.get('Content-Disposition') || '';
+      const m = cd.match(/filename="([^"]+)"/);
+      const filename = m ? m[1] : `logs.${fmt}`;
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
+      this.toast(I18n.t('toast.exportOk', { filename }) || 'downloaded', 'success');
+    } catch (e) {
+      this.toast(I18n.t('toast.exportFailed') + ': ' + (e.message || ''), 'error');
+    }
   },
 
   async discoverLocalWindsurf() {
@@ -4018,13 +4408,16 @@ const App = {
   statsChartType: 'bar',
   statsMetrics: { requests: true, success: true, errors: true },
   _lastStatsData: null,
-  // Softer, more cohesive palette — indigo / emerald / rose
+  // v2.0.59 — warmer, less saturated palette. Old indigo/emerald/rose
+  // read as "alarming" against the dark plot background; the new tones
+  // are still readable but feel calmer (warm amber for requests, soft
+  // teal-mint for success, dusty coral for errors).
   _chartColors: {
-    requests: '#818cf8',   // indigo-400
-    success:  '#34d399',   // emerald-400
-    errors:   '#fb7185',   // rose-400
+    requests: '#e0b482',   // warm amber
+    success:  '#7cc8a6',   // soft teal-mint
+    errors:   '#e08a8a',   // dusty coral
   },
-  _pieColors: ['#818cf8', '#34d399', '#fb7185', '#fbbf24', '#60a5fa', '#c084fc', '#22d3ee', '#f472b6'],
+  _pieColors: ['#e0b482', '#7cc8a6', '#e08a8a', '#f5d491', '#9bb8d4', '#c9a6cf', '#84c5c9', '#dda5b3'],
 
   setStatsRange(value) {
     this.statsRange = value;
@@ -4101,11 +4494,33 @@ const App = {
     const uptimeSec = d.startedAt ? Math.floor((Date.now() - d.startedAt) / 1000) : 0;
     const fmtUptime = s => s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s/60)}m` : s < 86400 ? `${(s/3600).toFixed(1)}h` : `${(s/86400).toFixed(1)}d`;
 
+    // v2.0.69 (#118 wnfilm): show fresh_input / cache_read / cache_write /
+    // output as separate buckets so users can tell whether their quota
+    // burn is real input or just cache traffic. Numbers come from the
+    // tokenTotals state recordTokenUsage feeds on every completed turn.
+    const tt = d.tokenTotals || { fresh_input: 0, cache_read: 0, cache_write: 0, output: 0, total: 0, requests_with_usage: 0 };
+    const fmtTok = (n) => n >= 1_000_000 ? (n/1_000_000).toFixed(1) + 'M'
+                       : n >= 1_000 ? (n/1_000).toFixed(1) + 'K'
+                       : String(n);
+    const tokensCardSub = tt.requests_with_usage > 0
+      ? `${tt.requests_with_usage} req · total ${fmtTok(tt.total)}`
+      : (I18n.t('card.tokens.subtitle.empty') || 'no usage data yet');
+
     document.getElementById('stats-cards').innerHTML = `
       <div class="card info"><div class="card-header"><div class="card-title">${I18n.t('card.stats.title')}</div></div><div class="card-value">${totalReq}</div><div class="card-sub">${I18n.t('card.stats.subtitle', { time: fmtUptime(uptimeSec) })}</div></div>
       <div class="card success"><div class="card-header"><div class="card-title">${I18n.t('card.success.title')}</div></div><div class="card-value">${d.successCount || 0}</div><div class="card-sub">${I18n.t('card.success.subtitle', { rate: successRate })}</div></div>
       <div class="card error"><div class="card-header"><div class="card-title">${I18n.t('card.errors.title')}</div></div><div class="card-value">${d.errorCount || 0}</div><div class="card-sub">${I18n.t('card.errors.subtitle', { rate: totalReq > 0 ? (100-Number(successRate)).toFixed(1) : '0.0' })}</div></div>
       <div class="card accent"><div class="card-header"><div class="card-title">${I18n.t('card.p95Latency.title')}</div></div><div class="card-value">${avgP95}<span style="font-size:14px;font-weight:400;margin-left:4px">ms</span></div><div class="card-sub">${I18n.t('card.p95Latency.subtitle', { count: allP95.length })}</div></div>
+      <div class="card info" style="grid-column: span 2;">
+        <div class="card-header"><div class="card-title">${I18n.t('card.tokens.title') || 'Token usage breakdown'}</div></div>
+        <div style="display:grid;grid-template-columns:repeat(4, 1fr);gap:12px;margin-top:8px;">
+          <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">fresh input</div><div style="font-size:18px;font-weight:600;">${fmtTok(tt.fresh_input)}</div></div>
+          <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">cache read</div><div style="font-size:18px;font-weight:600;">${fmtTok(tt.cache_read)}</div></div>
+          <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">cache write</div><div style="font-size:18px;font-weight:600;">${fmtTok(tt.cache_write)}</div></div>
+          <div><div style="font-size:11px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.04em;">output</div><div style="font-size:18px;font-weight:600;">${fmtTok(tt.output)}</div></div>
+        </div>
+        <div class="card-sub" style="margin-top:8px;">${tokensCardSub}</div>
+      </div>
     `;
 
     const models = d.modelCounts || {};
@@ -4170,11 +4585,44 @@ const App = {
     }));
     if (this.statsRange === 'custom' && this.statsCustomRange) {
       const { start, end } = this.statsCustomRange;
-      return all.filter(b => b.t >= start.getTime() && b.t <= end.getTime());
+      const inRange = all.filter(b => b.t >= start.getTime() && b.t <= end.getTime());
+      return this._padTimeline(inRange, start.getTime(), end.getTime());
     }
     if (this.statsRange === 'all' || this.statsRange === -1) return all;
+    // v2.0.59 — fixed-window ranges (6h/24h/7d/30d) now backfill missing
+    // hours with zero buckets so the chart timeline stays continuous.
+    // Without this, only hours with traffic show as bars — making 24h
+    // look like "6 pts" with huge gaps when traffic is sparse.
     const n = Number(this.statsRange);
-    return all.slice(-n);
+    if (!Number.isFinite(n) || n <= 0) return all.slice(-n);
+    const endMs = Math.floor(Date.now() / 3600_000) * 3600_000;
+    const startMs = endMs - (n - 1) * 3600_000;
+    return this._padTimeline(all.filter(b => b.t >= startMs && b.t <= endMs), startMs, endMs);
+  },
+
+  // Generate a contiguous hourly timeline between [startMs, endMs] (both
+  // inclusive, hour-aligned) and zero-fill any hour the backend didn't
+  // emit a bucket for. Keeps the bar chart visually rhythmic when traffic
+  // is sparse — empty bars render as flat baseline ticks instead of huge
+  // visible gaps that read as "broken chart".
+  _padTimeline(present, startMs, endMs) {
+    const map = new Map();
+    for (const b of present) map.set(Math.floor(b.t / 3600_000) * 3600_000, b);
+    const out = [];
+    const startHour = Math.floor(startMs / 3600_000) * 3600_000;
+    const endHour = Math.floor(endMs / 3600_000) * 3600_000;
+    for (let t = startHour; t <= endHour; t += 3600_000) {
+      const hit = map.get(t);
+      if (hit) { out.push(hit); continue; }
+      out.push({
+        hour: new Date(t).toISOString(),
+        t,
+        requests: 0,
+        errors: 0,
+        success: 0,
+      });
+    }
+    return out;
   },
 
   // Aggregate contiguous buckets so the chart stays readable when we have
@@ -4422,11 +4870,17 @@ const App = {
       const barW = Math.max(2, slotW - gap);
       buckets.forEach((b, i) => {
         const v = b.requests;
-        if (v === 0) return;
-        const h = (v / maxY) * cH * p; // animate height
+        const x = xAt(i) - barW / 2;
+        // v2.0.59 — render a 1px baseline tick for empty hours so the
+        // timeline has visible rhythm even when traffic is sparse.
+        if (v === 0) {
+          ctx.fillStyle = 'rgba(255,255,255,.08)';
+          ctx.fillRect(x, base - 1, barW, 1);
+          return;
+        }
+        const h = (v / maxY) * cH * p;
         const errRatio = v > 0 ? b.errors / v : 0;
         const color = this._errorTintedColor(errRatio);
-        const x = xAt(i) - barW / 2;
         const y = base - h;
         const grad = ctx.createLinearGradient(0, y, 0, y + h);
         grad.addColorStop(0, color);
@@ -4448,6 +4902,15 @@ const App = {
       const barW = Math.max(2, slotW - gap);
       buckets.forEach((b, i) => {
         const cx = xAt(i);
+        // v2.0.59 — baseline tick for empty hours so the chart looks
+        // continuous even when traffic is sparse (24h with 6 active
+        // hours used to render as huge gaps).
+        if ((m.success ? b.success : 0) + (m.errors ? b.errors : 0) === 0
+            && (m.requests ? b.requests : 0) === 0) {
+          ctx.fillStyle = 'rgba(255,255,255,.08)';
+          ctx.fillRect(cx - barW / 2, base - 1, barW, 1);
+          return;
+        }
         let stackV = 0;
         const segments = [];
         if (m.success && b.success > 0) segments.push({ v: b.success, color: this._chartColors.success });
@@ -4490,6 +4953,45 @@ const App = {
       if (m.requests && type === 'area') drawSmoothSeries(buckets.map(b => b.requests), this._chartColors.requests, { fill: true, thin: false });
     }
 
+    // v2.0.60 — hover crosshair: vertical line + highlight ring on the
+    // current bucket's bar, only after the entry animation finishes
+    // (p === 1) so it doesn't fight the growth tweens.
+    if (p === 1 && Number.isInteger(this._chartCursorIdx) && this._chartCursorIdx >= 0 && this._chartCursorIdx < buckets.length) {
+      const cx = xAt(this._chartCursorIdx);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(224,180,130,.42)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(cx, pad.t);
+      ctx.lineTo(cx, pad.t + cH);
+      ctx.stroke();
+      ctx.restore();
+
+      const hb = buckets[this._chartCursorIdx];
+      const total = (m.success ? hb.success : 0) + (m.errors ? hb.errors : 0) || hb.requests;
+      if (total > 0) {
+        const yT = yAt(total);
+        ctx.save();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath();
+        ctx.arc(cx, yT, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(224,180,130,.85)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+      } else {
+        // Empty bucket — small marker on baseline so user still sees they're hovering.
+        ctx.save();
+        ctx.fillStyle = 'rgba(224,180,130,.6)';
+        ctx.beginPath();
+        ctx.arc(cx, base, 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
     // X-axis labels — smart step based on time span
     ctx.fillStyle = 'rgba(255,255,255,.38)';
     ctx.font = '500 10px "JetBrains Mono", "Consolas", monospace';
@@ -4530,6 +5032,10 @@ const App = {
       const y = ev.clientY - rect.top;
       if (x < hm.pad.l || x > hm.W - 8 || y < hm.pad.t || y > hm.pad.t + hm.cH) {
         tipEl.classList.remove('show');
+        if (this._chartCursorIdx !== -1) {
+          this._chartCursorIdx = -1;
+          this._paintChart(1);
+        }
         return;
       }
       let best = 0, bestD = Infinity;
@@ -4537,6 +5043,13 @@ const App = {
         const d = Math.abs(hm.xAt(i) - x);
         if (d < bestD) { bestD = d; best = i; }
       });
+      // v2.0.60 — repaint with cursor index when it changes, so the
+      // vertical crosshair "snaps" to the closest bucket as the mouse
+      // moves. Skip when index is unchanged to avoid wasted draws.
+      if (this._chartCursorIdx !== best) {
+        this._chartCursorIdx = best;
+        this._paintChart(1);
+      }
       const b = hm.buckets[best];
       const rate = b.requests > 0 ? ((b.success / b.requests) * 100).toFixed(1) : '—';
       const time = new Date(b.hour).toLocaleString();
@@ -4557,7 +5070,13 @@ const App = {
       tipEl.style.left = left + 'px';
       tipEl.style.top = top + 'px';
     });
-    canvas.addEventListener('mouseleave', () => { tipEl.classList.remove('show'); });
+    canvas.addEventListener('mouseleave', () => {
+      tipEl.classList.remove('show');
+      if (this._chartCursorIdx !== -1) {
+        this._chartCursorIdx = -1;
+        this._paintChart(1);
+      }
+    });
   },
 
   _bindPieHover() {
@@ -4784,9 +5303,20 @@ const App = {
   },
 
   async loadExperimental() {
+    // v2.0.56: refresh the credentials snapshot whenever the user opens
+    // the experimental/settings panel so the masked key + source labels
+    // stay in sync with what runtime-config.json actually holds.
+    this.loadCredentials();
     const d = await this.api('GET', '/experimental');
     const cb = document.getElementById('exp-cascade-reuse');
     if (cb) cb.checked = !!d.flags?.cascadeConversationReuse;
+    // v2.0.58 — drought-mode premium gate toggle.
+    const cbDrought = document.getElementById('exp-drought-restrict');
+    if (cbDrought) cbDrought.checked = !!d.flags?.droughtRestrictPremium;
+    // v2.0.70 (#112 follow-up) — quiet-window auto-update toggle.
+    const cbQw = document.getElementById('exp-quiet-window');
+    if (cbQw) cbQw.checked = !!d.flags?.autoUpdateQuietWindow;
+    this.loadQuietWindowStatus();
     // Reflect current skin cookie in the dropdown so reload state is visible.
     const skinSel = document.getElementById('skin-select');
     if (skinSel) {
@@ -4897,12 +5427,144 @@ const App = {
     }
   },
 
+  // v2.0.70 (#112 follow-up) — quiet-window status panel + manual run.
+  async loadQuietWindowStatus() {
+    const el = document.getElementById('quiet-window-status');
+    if (!el) return;
+    try {
+      const r = await this.api('GET', '/auto-update/quiet-window');
+      const reason = r.decision?.reason || 'unknown';
+      const labelKey = ({
+        disabled: 'quietWindow.status.disabled',
+        'cold-start': 'quietWindow.status.coldStart',
+        cooldown: 'quietWindow.status.cooldown',
+        busy: 'quietWindow.status.busy',
+        eligible: 'quietWindow.status.eligible',
+      })[reason];
+      const label = labelKey ? I18n.t(labelKey) : reason;
+      const ring = r.ringSize || 0;
+      const last = r.lastUpdateAt
+        ? new Date(r.lastUpdateAt).toLocaleString()
+        : I18n.t('quietWindow.never');
+      el.textContent = `${label} - ring=${ring} - ${I18n.t('quietWindow.lastUpdate')} ${last}`;
+    } catch (e) {
+      el.textContent = `${I18n.t('quietWindow.loadFailed')}: ${e.message}`;
+    }
+  },
+
+  async runQuietWindowNow() {
+    try {
+      const r = await this.api('POST', '/auto-update/quiet-window/run', {});
+      const reason = r.result?.reason || 'unknown';
+      const triggered = r.result?.result?.ok ? ` - ${I18n.t('quietWindow.triggered')}` : '';
+      this.toast(`tick reason=${reason}${triggered}`, 'info');
+      this.loadQuietWindowStatus();
+    } catch (e) {
+      this.toast(`${I18n.t('quietWindow.triggerFailed')}: ${e.message}`, 'error');
+    }
+  },
+
   async clearConversationPool() {
     const ok = await this.confirm(I18n.t('action.clearPool'), I18n.t('confirm.clearPoolDesc') || 'All active Cascade sessions will be cleared. Continue?', { okText: I18n.t('action.clearPool') });
     if (!ok) return;
     const r = await this.api('DELETE', '/experimental/conversation-pool');
     this.toast(`${I18n.t('toast.cleared')} ${r.cleared || 0}`, 'success');
     this.loadExperimental();
+  },
+
+  // ─── Drought banner (v2.0.57 Fix 5) ─────────────────────────
+  async loadDrought() {
+    const banner = document.getElementById('drought-banner');
+    const msg = document.getElementById('drought-message');
+    const detail = document.getElementById('drought-detail');
+    if (!banner || !msg || !detail) return;
+    try {
+      const d = await this.api('GET', '/drought');
+      if (!d?.drought) {
+        banner.style.display = 'none';
+        return;
+      }
+      banner.style.display = '';
+      const lw = d.lowestWeeklyPercent;
+      const ld = d.lowestDailyPercent;
+      const summary = (lw == null ? '' : `min weekly=${lw.toFixed(0)}%`)
+        + (ld == null ? '' : ` · min daily=${ld.toFixed(0)}%`)
+        + ` · ${d.knownAccounts}/${d.activeAccounts} accounts known`;
+      msg.textContent = I18n.t('drought.body') || msg.textContent;
+      detail.textContent = summary;
+    } catch (e) {
+      // no /drought endpoint on older backends — silently hide.
+      banner.style.display = 'none';
+    }
+  },
+
+  // ─── Credentials (v2.0.56) ──────────────────────────────────
+  async loadCredentials() {
+    try {
+      const d = await this.api('GET', '/settings/credentials');
+      document.getElementById('credentials-apikey-source').textContent = '[' + (d.apiKeySource || 'unset') + ']';
+      document.getElementById('credentials-apikey-masked').textContent = d.apiKey_masked || '(unset)';
+      document.getElementById('credentials-dashboardpw-source').textContent = '[' + (d.dashboardPasswordSource || 'unset') + ']';
+      document.getElementById('credentials-dashboardpw-status').textContent =
+        d.dashboardPasswordSet ? (I18n.t('credentials.set') || 'set') : (I18n.t('credentials.unset') || 'unset');
+    } catch (e) {
+      this.toast('Failed to load credentials: ' + (e.message || ''), 'error');
+    }
+  },
+
+  toggleApiKeyVisibility() {
+    const el = document.getElementById('credentials-apikey-input');
+    el.type = el.type === 'password' ? 'text' : 'password';
+  },
+
+  toggleDashboardPwVisibility() {
+    const el = document.getElementById('credentials-dashboardpw-input');
+    el.type = el.type === 'password' ? 'text' : 'password';
+  },
+
+  async saveCredential(field) {
+    const inputId = field === 'apiKey' ? 'credentials-apikey-input' : 'credentials-dashboardpw-input';
+    const el = document.getElementById(inputId);
+    const value = el.value;
+    const labelMap = {
+      apiKey: I18n.t('credentials.apiKey') || 'API_KEY',
+      dashboardPassword: I18n.t('credentials.dashboardPassword') || 'Dashboard password',
+    };
+    const cleared = value === '';
+    const okConfirm = await this.confirm(
+      labelMap[field],
+      cleared
+        ? (I18n.t('credentials.confirmClear') || 'Clear runtime override and fall back to .env value?')
+        : (I18n.t('credentials.confirmSave') || 'After saving, the old value stops working immediately. Continue?'),
+      { okText: I18n.t('credentials.save') || 'Save' }
+    );
+    if (!okConfirm) return;
+    try {
+      const r = await this.api('PUT', '/settings/credentials', { [field]: value });
+      el.value = '';
+      this.toast(r.success ? (I18n.t('credentials.saved') || 'Saved') : 'Saved', 'success');
+      // After rotating dashboard password, the current session is no longer
+      // authenticated. Force a re-login flow so the user gets the right
+      // prompt rather than a misleading "session expired" later.
+      if (field === 'dashboardPassword' && !cleared) {
+        sessionStorage.removeItem('dashboard_password');
+        setTimeout(() => location.reload(), 800);
+        return;
+      }
+      // Same for API_KEY when the runtime fallback is also the dashboard
+      // password on localhost binds — safest is reload + reprompt.
+      if (field === 'apiKey') {
+        // Only force reload when the dashboard auth might have been the
+        // API_KEY fallback (localhost+no DASHBOARD_PASSWORD). The server
+        // /settings/credentials response doesn't tell us, so refresh the
+        // panel state and let the next API call surface 401 if needed.
+        this.loadCredentials();
+      } else {
+        this.loadCredentials();
+      }
+    } catch (e) {
+      this.toast('Save failed: ' + (e.message || ''), 'error');
+    }
   },
 
   // ─── Console skin (default ↔ experimental sketch UI) ────────
@@ -5013,12 +5675,24 @@ const App = {
     return this.CONTRIBUTORS_CACHE;
   },
   contributorRarity(weight) {
+    // v2.0.60 — three new tiers above the previous UR ceiling so the
+    // rarity ladder doesn't compress everyone past S+ into one badge.
+    //   GOD : project creator / maintainer (only dwgx)
+    //   MR  : "Mythic Rare" — multi-PR contributors above S+ (e.g.
+    //         baily-zhang has 4 ship-ready PRs spanning fingerprint /
+    //         dashboard / opus-multimodal — beyond a single S+ slot)
+    //   LR  : "Legendary Rare" — single S++ tier (reserved for
+    //         exceptional one-shot work that materially shifts arch)
+    if (weight === 'GOD') return 'GOD';
+    if (weight === 'MR') return 'MR';
+    if (weight === 'LR' || weight === 'S++') return 'LR';
     if (weight === 'S+') return 'UR';
     if (weight === 'S' || weight === 'A+') return 'SSR';
-    return 'SR';
+    if (weight === 'A' || weight === 'B+') return 'SR';
+    return 'R';
   },
   weightRank(w) {
-    return ({ 'S+': 6, 'S': 5, 'A+': 4, 'A': 3, 'B+': 2, 'B': 1 })[w] || 0;
+    return ({ 'GOD': 100, 'MR': 12, 'LR': 10, 'S++': 10, 'S+': 6, 'S': 5, 'A+': 4, 'A': 3, 'B+': 2, 'B': 1 })[w] || 0;
   },
   groupContributors(list) {
     const map = new Map();

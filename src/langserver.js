@@ -8,7 +8,7 @@
  * canceled.
  */
 
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { mkdirSync } from 'fs';
 import { existsSync } from 'fs';
 import http2 from 'http2';
@@ -34,6 +34,42 @@ let _nextPort = DEFAULT_PORT + 1;
 let _binaryPath = DEFAULT_BINARY;
 let _apiServerUrl = DEFAULT_API_URL;
 
+// v2.0.71 (#119 follow-up): heuristic to recognise sticky-IP proxy
+// usernames. Common providers embed a session/IP token inside the
+// username so the same host:port serves many distinct egress IPs:
+//   ipwo:        username_sid_xxxxxxx
+//   lunaproxy:   user-zone-residential-session-xxx
+//   smartproxy:  spxxxxx-session-xxx-stickyXX
+//   bright data: brd-customer-xxx-zone-xxx[-session-xxx]
+//   oxylabs:     customer-xxxxx-cc-xxx[-sessid-xxx]
+// Match any of these and segregate LS automatically. Falls back to
+// host:port when the username doesn't fit the pattern (avoids
+// LS-per-account memory blow up for static-IP proxies that intentionally
+// share an egress).
+//
+// v2.0.79 (audit M-1) — original regex only caught usernames that
+// contained an explicit session token (`_sid_`, `-session-`, `+ws_`).
+// Bright Data and Oxylabs username schemas don't always include the
+// session token (some plans use a stable username + rotating egress
+// per-request, but the upstream still treats the username itself as
+// the routing fingerprint). Those usernames look like:
+//   brd-customer-hl_abc123-zone-residential
+//   customer-myuser-cc-US-country-US
+// They'd hash to the same proxyKey as a static-IP shared username
+// (because there's no `session` token), so the LS pool would lump
+// every account behind that proxy onto one shared LS instance, which
+// is what wnfilm and 0a00 reported in #118 — "30 minute rate-limit
+// even though I have 31 trial accounts behind it". Widen the regex
+// to also catch `brd-customer-` prefix and `customer-...-cc-` /
+// `customer-...-zone-` patterns. Static-IP proxies whose username is
+// a bare login (no provider-specific markers) still skip
+// segregation, so memory stays bounded.
+const STICKY_USER_RE = /(?:[_-](?:sid|session|sessid|sticky|sess)|[+]ws_|^brd-customer-|customer-[^-]+-(?:cc|zone|country|state|city)-|-zone-[a-z]+|-cc-[a-z]{2})/i;
+function isStickyUsername(u) {
+  if (typeof u !== 'string' || u.length < 4) return false;
+  return STICKY_USER_RE.test(u);
+}
+
 function proxyKey(proxy) {
   if (!proxy || !proxy.host) return 'default';
   // Sanitize to [A-Za-z0-9_] — the key flows into a filesystem path
@@ -41,7 +77,35 @@ function proxyKey(proxy) {
   // special character that could slip past execSync's naive quoting.
   const safeHost = proxy.host.replace(/[^a-zA-Z0-9]/g, '_');
   const safePort = String(proxy.port || 8080).replace(/[^0-9]/g, '');
-  return `px_${safeHost}_${safePort}`;
+  let key = `px_${safeHost}_${safePort}`;
+  // v2.0.68/v2.0.71 (#119 CharwinYAO): sticky-IP proxy services (ipwo,
+  // lunaproxy, smartproxy, oxylabs, bright data) embed a per-IP session
+  // id inside the username. Default behaviour pools all sticky sessions
+  // onto one LS instance (host:port identical) so multiple accounts
+  // share one LS sessionId / Windsurf fingerprint, tripping upstream's
+  // 30-min rate limit even though egress IPs differ.
+  //
+  // Auto-on (v2.0.71): username matches a known sticky session pattern
+  // (`_sid_`, `-session-`, `-sticky`, `-sessid-`, `+ws_`) → segregate.
+  // Static-IP proxies don't carry these markers so memory stays bounded.
+  // Operator can force-on (`WINDSURFAPI_LS_PER_PROXY_USER=1`) to
+  // segregate every distinct username, or force-off (`=0`) to disable.
+  let segregateByUser = false;
+  if (process.env.WINDSURFAPI_LS_PER_PROXY_USER === '0') {
+    segregateByUser = false;
+  } else if (process.env.WINDSURFAPI_LS_PER_PROXY_USER === '1') {
+    segregateByUser = !!proxy.username;
+  } else if (proxy.username && isStickyUsername(proxy.username)) {
+    segregateByUser = true;
+  }
+  if (segregateByUser) {
+    // Cap user portion at 32 chars to keep filesystem paths sane on
+    // Windows where MAX_PATH still bites; sticky session ids are
+    // typically <16 chars anyway.
+    const safeUser = String(proxy.username).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 32);
+    if (safeUser) key += `_u${safeUser}`;
+  }
+  return key;
 }
 
 function dataDirForKey(key) {
@@ -394,6 +458,24 @@ export function getLsEntryByPort(port) {
   return null;
 }
 
+/**
+ * Iterate over live LS pool keys. Used by the dashboard binary-update
+ * endpoint to restart every spawned instance after install-ls.sh
+ * replaces the binary on disk.
+ */
+export function _poolKeys() {
+  return [..._pool.keys()];
+}
+
+/**
+ * Recover the proxy descriptor for a given pool key. Returns null for
+ * the default no-proxy entry.
+ */
+export function getProxyByKey(key) {
+  const entry = _pool.get(key);
+  return entry?.proxy || null;
+}
+
 // ─── Backward-compat API ───────────────────────────────────
 
 export function getLsPort() {
@@ -411,6 +493,72 @@ export async function startLanguageServer(opts = {}) {
   _apiServerUrl = opts.apiServerUrl || process.env.CODEIUM_API_URL || _apiServerUrl;
   const def = await ensureLs(null);
   return { port: def.port, csrfToken: def.csrfToken };
+}
+
+/**
+ * v2.0.85 (#127 123cek): scan host process table for orphan
+ * `language_server_linux_x64` instances left over from previous runs
+ * (e.g. self-update via `process.exit(0)` skipped the SIGTERM hook,
+ * or PM2 SIGKILL killed us before stopLanguageServer could run) and
+ * kill them. Keeps long-running PM2 deployments from accumulating
+ * dead LS processes that hold their pool ports.
+ *
+ * Limited to processes whose argv[0] matches our `_binaryPath` (or
+ * the legacy DEFAULT_BINARY) so unrelated `language_server_linux_x64`
+ * binaries on the same host (rare) are not touched. No-op on Windows
+ * since the LS binary is Linux-only there.
+ *
+ * Skips itself: PIDs we currently track in `_pool` (none yet at
+ * startup, but called also from /self-update before exit).
+ *
+ * Best-effort: any error is logged but doesn't block startup.
+ */
+export function cleanupOrphanLanguageServers() {
+  if (process.platform === 'win32') return { scanned: 0, killed: 0 };
+  let scanned = 0;
+  let killed = 0;
+  const ourPids = new Set();
+  for (const entry of _pool.values()) {
+    if (entry?.process?.pid) ourPids.add(entry.process.pid);
+  }
+  const targetBinaries = new Set([_binaryPath, DEFAULT_BINARY]);
+  try {
+    // -e: every process; -o pid,args: pid + full argv (so we can match
+    // the binary path). Cap output at a few hundred lines via head; LS
+    // pids are typically small clusters, not thousands.
+    const out = execSync('ps -e -o pid=,args=', { timeout: 3000, encoding: 'utf-8' });
+    for (const line of out.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const m = trimmed.match(/^(\d+)\s+(.*)$/);
+      if (!m) continue;
+      const pid = parseInt(m[1], 10);
+      const argv = m[2];
+      // Match either the configured binary path OR the default path.
+      // v2.0.88 (audit L-1): anchor the match to argv[0] so we don't
+      // SIGTERM a `grep language_server_linux_x64` or a monitoring
+      // agent whose argv mentions our binary path elsewhere.
+      const argv0 = argv.split(/\s+/, 1)[0];
+      let isOurs = false;
+      for (const bin of targetBinaries) {
+        if (bin && argv0 === bin) { isOurs = true; break; }
+      }
+      if (!isOurs) continue;
+      scanned++;
+      if (ourPids.has(pid)) continue;
+      if (pid === process.pid) continue;
+      try {
+        process.kill(pid, 'SIGTERM');
+        killed++;
+        log.info(`Killed orphan LS pid=${pid} (${argv.slice(0, 80)}...)`);
+      } catch (e) {
+        if (e.code !== 'ESRCH') log.warn(`Could not kill orphan LS pid=${pid}: ${e.message}`);
+      }
+    }
+  } catch (e) {
+    log.warn(`cleanupOrphanLanguageServers: ${e.message}`);
+  }
+  return { scanned, killed };
 }
 
 export function stopLanguageServer() {
@@ -431,6 +579,53 @@ export function stopLanguageServer() {
         m.invalidateFor({ lsPort: p.port, lsGeneration: p.generation });
       }
     }).catch(() => {});
+  }
+}
+
+/**
+ * v2.0.88 (audit H-4): like `stopLanguageServer` but waits for each
+ * spawned LS process to actually exit (capped per-process timeout)
+ * before returning. Used by `dashboard /self-update` so `process.exit`
+ * doesn't fire while children still hold their ports — preventing
+ * orphan LS processes that would otherwise win a port-conflict race
+ * against the freshly-restarted parent.
+ *
+ * Per-process wait cap defaults to 1.5s; total wait for many LSes is
+ * bounded by Promise.allSettled. SIGKILL fallback if SIGTERM doesn't
+ * land within the cap.
+ */
+export async function stopLanguageServerAndWait({ perProcessTimeoutMs = 1500 } = {}) {
+  const procs = [];
+  const portsToClose = [];
+  for (const [key, entry] of _pool) {
+    if (entry?.process) procs.push({ key, proc: entry.process });
+    if (entry?.port) portsToClose.push({ port: entry.port, generation: entry.generation });
+  }
+  _pool.clear();
+  await Promise.allSettled(procs.map(({ key, proc }) => new Promise((resolve) => {
+    let settled = false;
+    const finish = (how) => {
+      if (settled) return;
+      settled = true;
+      log.info(`LS instance ${key} stopped (${how})`);
+      resolve();
+    };
+    try { proc.once('exit', () => finish('exited')); } catch {}
+    try { proc.kill('SIGTERM'); } catch (e) { finish(`kill failed: ${e.message}`); return; }
+    setTimeout(() => {
+      if (settled) return;
+      try { proc.kill('SIGKILL'); } catch {}
+      finish(`SIGKILL after ${perProcessTimeoutMs}ms`);
+    }, perProcessTimeoutMs).unref();
+  })));
+  if (portsToClose.length) {
+    try {
+      const m = await import('./conversation-pool.js');
+      for (const p of portsToClose) {
+        closeSessionForPort(p.port);
+        m.invalidateFor({ lsPort: p.port, lsGeneration: p.generation });
+      }
+    } catch {}
   }
 }
 

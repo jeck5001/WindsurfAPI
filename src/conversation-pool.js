@@ -90,6 +90,115 @@ function stripMetaTags(s) {
   return stripped;
 }
 
+// v2.0.61 (#111) — normalize dynamic chunks of the system prompt that
+// drift across turns (today's date, ISO timestamps, working directory,
+// session UUIDs) so the same logical Claude Code session keeps the
+// same cascade fingerprint instead of cache-missing every turn.
+//
+// Without this, Claude Code's 26KB system prompt (which embeds the
+// current date / cwd / session id) hashed differently every request,
+// reuse silently fell back to fresh, and the model looked like it was
+// "looping" because each call started a new cascade.
+//
+// Patterns are conservative — only normalize tokens that are
+// (a) verifiably temporal/identifier-shaped and (b) common enough in
+// real Claude Code system prompts that their presence dominated the
+// hash. Plain prose drift remains in the hash so genuine prompt edits
+// still create a fresh cascade.
+function normalizeSystemPromptForHash(s) {
+  let out = String(s || '');
+  // ─── temporal / identifier tokens ────────────────────────────
+  out = out
+    // ISO 8601 timestamps (with or without ms / tz)
+    .replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, '<ts>')
+    // "Today's date is YYYY-MM-DD" / "Today is YYYY-MM-DD" / etc.
+    .replace(/\b(Today(?:'s)?\s+(?:date|is)(?:\s+is)?\s*[:\-]?\s*)\d{4}-\d{2}-\d{2}/gi, '$1<date>')
+    // Bare YYYY-MM-DD lines (date-only) when standalone
+    .replace(/(?<!\d)\d{4}-\d{2}-\d{2}(?!\d|T)/g, '<date>')
+    // UUIDs (8-4-4-4-12 hex) — session/account ids, always
+    .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
+    // Working directory lines (Claude Code prepends each turn).
+    //
+    // v2.0.78 (audit H-3): the previous form
+    //   `'$&'.replace(/[^:：]+$/, ' <cwd>')`
+    // was a parse-time evaluation of `'$&'.replace(...)` which
+    // collapsed to the literal string `' <cwd>'` — every match was
+    // replaced by the bare placeholder, dropping the label too. Two
+    // sessions whose only label difference was `Working directory:`
+    // vs `cwd:` would hash identically (potential cross-session
+    // reuse). Now uses a real capture group so the label is
+    // preserved.
+    .replace(/(^[ \t]*[-•]?\s*(?:Working\s+directory|Current\s+working\s+directory|cwd|CWD)\s*[:：])[^\n]*/gim, '$1 <cwd>')
+    // "Current time:" / "Time:" lines (same fix as above)
+    .replace(/(^[ \t]*[-•]?\s*(?:Current\s+(?:date|time)|Time)\s*[:：])[^\n]*/gim, '$1 <time>')
+    // Session ID lines (Claude Code 2.x emits these)
+    .replace(/(^[ \t]*[-•]?\s*(?:Session\s*ID|sessionId|session_id)\s*[:：])[^\n]*/gim, '$1 <sessionid>')
+    // Epoch timestamps in seconds (10 digits) or ms (13 digits) when
+    // bare (not part of a longer number). Claude Code's status line and
+    // some MCP servers emit these. 1700000000 (2023-11) to 2099999999
+    // (2036) covers the realistic range without hitting other 10-digit
+    // numbers like phone numbers or IDs.
+    .replace(/(?<![\d.])(?:1[7-9]|20)\d{8}(?:\d{3})?(?![\d.])/g, '<epoch>');
+
+  // ─── git status / recent commits block (Claude Code 2.x) ─────
+  //
+  // v2.0.74 (#116 zhangzhang-bit). Claude Code prepends a `gitStatus:`
+  // block to the system prompt:
+  //
+  //     gitStatus: This is the git status at the start of the conversation.
+  //
+  //     Current branch: master
+  //     Main branch (you will usually use this for PRs): master
+  //     Git user: dwgx
+  //     Status:
+  //     M src/foo.js
+  //     ?? newfile.txt
+  //
+  //     Recent commits:
+  //     abc1234 release: 2.0.73 — ...
+  //     def5678 release: 2.0.72 — ...
+  //
+  // The body shifts every time the user commits or touches a file but
+  // the labels are invariant. zhangzhang-bit's #116 log shows
+  // 26892-byte system prompts hashing differently across 30 turns —
+  // commit-hash diffs in this block keep total length stable while
+  // changing content, so length-based detection misses it.
+  //
+  // Strategy: collapse the body of `Status:`, `Recent commits:`, and
+  // `Recent files:` to a stable placeholder. Headings + Branch / Main
+  // branch / Git user keep their literal values (those rarely move
+  // and meaningfully separate caches when they do). Lookahead anchors
+  // the body extent at the next labelled heading or a blank line; if
+  // the block runs to end-of-input, $(?![\s\S]) catches that too
+  // since plain `$` under /m only matches end-of-line in JS.
+  const NEXT_HEADING = '(?:Status|Recent commits|Recent files|gitStatus|Current branch|Main branch|Git user)\\s*:';
+  const blockEnd = `(?=^[ \\t]*${NEXT_HEADING}|^\\s*$|$(?![\\s\\S]))`;
+  out = out.replace(
+    new RegExp(`^([ \\t]*Status\\s*:)[ \\t]*\\n[\\s\\S]*?${blockEnd}`, 'gim'),
+    '$1\n<git-status>\n',
+  );
+  out = out.replace(
+    new RegExp(`^([ \\t]*Recent commits\\s*:)[ \\t]*\\n[\\s\\S]*?${blockEnd}`, 'gim'),
+    '$1\n<recent-commits>\n',
+  );
+  out = out.replace(
+    new RegExp(`^([ \\t]*Recent files\\s*:)[ \\t]*\\n[\\s\\S]*?${blockEnd}`, 'gim'),
+    '$1\n<recent-files>\n',
+  );
+
+  // ─── git short hashes ────────────────────────────────────────
+  // After Recent commits is folded above we still want to catch stray
+  // short hashes that callers paste inline ("see commit abc1234"). 7-12
+  // hex chars with word boundaries; require at least one digit AND at
+  // least one a-f letter so we skip both ordinary words like deadbeef
+  // (no digits) and bare integers like 1234567890 (no hex letters).
+  // Skip if wrapped in quotes (likely a literal string the user is
+  // asking about — preserving it lets distinct queries hash distinctly).
+  out = out.replace(/(?<![`'"\w])(?=[a-f0-9]*\d)(?=[a-f0-9]*[a-f])[a-f0-9]{7,12}(?![`'"\w])/gi, '<gitsha>');
+
+  return out;
+}
+
 // Stable JSON: recursively sort object keys so {b:1,a:2} and {a:2,b:1}
 // produce the same string. Without this, two equivalent inputs hash
 // differently when client serialization order varies.
@@ -233,19 +342,37 @@ function systemDigest(messages) {
   if (process.env.CASCADE_REUSE_HASH_SYSTEM === '0') return '';
   const sys = messages.filter(m => m?.role === 'system');
   if (!sys.length) return '';
-  return shortDigest(stableStringify(sys.map(projectMessage)), 32);
+  // v2.0.61 (#111) — apply normalizeSystemPromptForHash to each text
+  // block so dynamic chunks (today's date / cwd / session id / ISO ts /
+  // UUIDs) don't drift the system fingerprint each turn.
+  const normalized = sys.map(m => {
+    const projected = projectMessage(m);
+    if (Array.isArray(projected.content)) {
+      projected.content = projected.content.map(b => {
+        if (b?.type === 'text' && typeof b.text === 'string') {
+          return { ...b, text: normalizeSystemPromptForHash(b.text) };
+        }
+        return b;
+      });
+    }
+    return projected;
+  });
+  return shortDigest(stableStringify(normalized), 32);
 }
 
 function toolContextDigest(opts = {}) {
   if (!opts.emulateTools) return '';
-  const tools = Array.isArray(opts.tools) ? opts.tools.map(t => {
+  // v2.0.61 (#111) — sort tools by name before hashing so client-side
+  // ordering changes (Claude Code 2.x occasionally reshuffles its 70+
+  // tool list across turns) don't drift the tool fingerprint.
+  const tools = (Array.isArray(opts.tools) ? opts.tools.map(t => {
     const fn = t?.function || t;
     return {
       name: fn?.name || '',
       description: fn?.description || '',
       parameters: fn?.parameters ?? fn?.input_schema ?? null,
     };
-  }) : [];
+  }) : []).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
   return shortDigest(stableStringify({
     tools,
     tool_choice: opts.toolChoice ?? null,
@@ -382,12 +509,20 @@ export function checkout(fingerprint, callerKey = '', expected = null) {
   if (!fingerprint) { stats.misses++; return null; }
   const entry = _pool.get(fingerprint);
   if (!entry) { stats.misses++; return null; }
-  _pool.delete(fingerprint);
+
+  // Validate BEFORE removing from the pool. The previous order
+  // (`delete` first, then check) had a subtle leak: when a caller's
+  // request fingerprinted the same as someone else's (different
+  // callerKey) we deleted the rightful owner's entry on the way to
+  // returning null, so the legitimate caller lost their cascade
+  // resume forever. Keep the entry in place on mismatch so the
+  // owner's next turn still finds it.
   if (entry.callerKey && callerKey && entry.callerKey !== callerKey) {
     stats.misses++;
     return null;
   }
   if (Date.now() - entry.lastAccess > effectiveTtl(entry)) {
+    _pool.delete(fingerprint);
     stats.expired++;
     stats.misses++;
     return null;
@@ -400,12 +535,23 @@ export function checkout(fingerprint, callerKey = '', expected = null) {
       return null;
     }
   }
+
+  // Validated. Now remove and hand to the caller.
+  _pool.delete(fingerprint);
   stats.hits++;
   return entry;
 }
 
 /**
  * Store (or restore) a conversation entry under a new fingerprint.
+ *
+ * `fingerprint` accepts a single string OR an array of strings. When
+ * an array is given the SAME entry is indexed under each fingerprint —
+ * used by v2.0.87 auto-fallback (#129 wnfilm) to keep the cascade
+ * findable under both the original-model fingerprint AND the
+ * fallback-model fingerprint, so the next turn from the client (under
+ * the original model name) doesn't miss the pool and force the LLM to
+ * re-read history from scratch.
  *
  * `ttlHintMs` (optional) extends this entry's expiry past the pool's
  * default 30 min — used to honour Anthropic prompt-caching markers that
@@ -416,7 +562,11 @@ export function checkout(fingerprint, callerKey = '', expected = null) {
  * 1h window doesn't outlive its source request (MED-2).
  */
 export function checkin(fingerprint, entry, callerKey = '', ttlHintMs) {
-  if (!fingerprint || !entry) return;
+  if (!entry) return;
+  const fingerprints = Array.isArray(fingerprint)
+    ? fingerprint.filter((fp) => typeof fp === 'string' && fp)
+    : (fingerprint ? [fingerprint] : []);
+  if (!fingerprints.length) return;
   const now = Date.now();
   let resolvedHint;
   if (ttlHintMs === undefined) {
@@ -426,21 +576,32 @@ export function checkin(fingerprint, entry, callerKey = '', ttlHintMs) {
   } else {
     resolvedHint = ttlHintMs;
   }
-  _pool.set(fingerprint, {
-    cascadeId: entry.cascadeId,
-    sessionId: entry.sessionId,
-    lsPort: entry.lsPort,
-    lsGeneration: entry.lsGeneration,
-    apiKey: entry.apiKey,
-    callerKey: callerKey || entry.callerKey || '',
-    stepOffset: Number.isFinite(entry.stepOffset) ? entry.stepOffset : 0,
-    generatorOffset: Number.isFinite(entry.generatorOffset) ? entry.generatorOffset : 0,
-    historyCoverage: entry.historyCoverage || null,
-    createdAt: entry.createdAt || now,
-    lastAccess: now,
-    ...(Number.isFinite(resolvedHint) && resolvedHint > 0 ? { ttlHintMs: resolvedHint } : {}),
-  });
+  // Build the canonical entry once, then write under each requested
+  // fingerprint. Each Map slot holds a separate object instance so a
+  // future invalidate/checkout under one key doesn't accidentally
+  // mutate the others.
+  for (const fp of fingerprints) {
+    _pool.set(fp, {
+      cascadeId: entry.cascadeId,
+      sessionId: entry.sessionId,
+      lsPort: entry.lsPort,
+      lsGeneration: entry.lsGeneration,
+      apiKey: entry.apiKey,
+      callerKey: callerKey || entry.callerKey || '',
+      stepOffset: Number.isFinite(entry.stepOffset) ? entry.stepOffset : 0,
+      generatorOffset: Number.isFinite(entry.generatorOffset) ? entry.generatorOffset : 0,
+      historyCoverage: entry.historyCoverage || null,
+      createdAt: entry.createdAt || now,
+      lastAccess: now,
+      ...(Number.isFinite(resolvedHint) && resolvedHint > 0 ? { ttlHintMs: resolvedHint } : {}),
+    });
+  }
+  // v2.0.88 (audit M-1): count once per logical checkin (one
+  // conversation), not once per fingerprint slot. Otherwise the
+  // dashboard's "stores" counter doubles whenever auto-fallback fires
+  // and operators read pool efficiency wrong.
   stats.stores++;
+  if (fingerprints.length > 1) stats.aliasWrites = (stats.aliasWrites || 0) + (fingerprints.length - 1);
   prune(now);
 }
 
@@ -451,17 +612,39 @@ export function checkin(fingerprint, entry, callerKey = '', ttlHintMs) {
  */
 export function invalidateFor({ apiKey, lsPort, lsGeneration } = {}) {
   let dropped = 0;
+  // v2.0.88 (audit H-2) — two-pass scan. v2.0.87 dual-write checkin
+  // can index the same cascadeId under multiple fingerprint slots.
+  // The previous single-pass `if (lsPort) delete` would only drop the
+  // first slot it scanned; if the per-port scan iterated past a sibling
+  // slot under different ordering, that slot stayed in the pool
+  // pointing to a now-dead cascadeId on a now-restarted LS. Next turn
+  // would hit `cascade not found`, set reuseEntryDead, and force a
+  // full history replay — silent one-turn failure on every LS restart.
+  // Pass 1: collect every cascadeId tied to the going-away tuple.
+  // Pass 2: drop every slot pointing at any of those cascadeIds.
+  const targetCascadeIds = new Set();
+  for (const [, e] of _pool) {
+    let hit = false;
+    if (apiKey && e.apiKey === apiKey) hit = true;
+    if (!hit && lsPort && e.lsPort === lsPort) {
+      if (lsGeneration == null || e.lsGeneration == null || e.lsGeneration === lsGeneration) hit = true;
+    }
+    if (hit && e.cascadeId) targetCascadeIds.add(e.cascadeId);
+  }
   for (const [fp, e] of _pool) {
-    if (apiKey && e.apiKey === apiKey) { _pool.delete(fp); dropped++; continue; }
-    if (lsPort && e.lsPort === lsPort) {
-      // When generation is supplied on both sides, only drop entries for the
-      // SAME generation — lets a same-port LS replace the old one without
-      // nuking healthy entries from the new one. When either side lacks a
-      // generation tag, fall back to port-only matching for safety.
-      if (lsGeneration == null || e.lsGeneration == null || e.lsGeneration === lsGeneration) {
-        _pool.delete(fp);
-        dropped++;
-      }
+    let drop = false;
+    if (apiKey && e.apiKey === apiKey) drop = true;
+    if (!drop && lsPort && e.lsPort === lsPort) {
+      if (lsGeneration == null || e.lsGeneration == null || e.lsGeneration === lsGeneration) drop = true;
+    }
+    // Sibling-cleanup: any slot pointing at a cascadeId we already
+    // decided to drop must also go, even if its own apiKey/lsPort
+    // happens not to match (e.g. an alias slot whose apiKey was set
+    // from the entry instead of the going-away account).
+    if (!drop && e.cascadeId && targetCascadeIds.has(e.cascadeId)) drop = true;
+    if (drop) {
+      _pool.delete(fp);
+      dropped++;
     }
   }
   return dropped;

@@ -7,8 +7,8 @@
  */
 
 import https from 'https';
-import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { randomUUID, createHash } from 'crypto';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { log } from './config.js';
 import { extractImages } from './image.js';
@@ -100,7 +100,20 @@ function escapeHistoryTag(text, tag) {
  */
 function neutralizeIdentityForCascade(sysText) {
   if (!sysText) return sysText;
-  return sysText.replace(/(^|[\n.!?]\s*)You are /g, '$1The assistant is ');
+  // v2.0.91 — sanitize content-policy triggers that Windsurf upstream
+  // flags as "Your request was blocked by our content policy". Codex
+  // and other client-side IDEs inject internal brand references
+  // (Devin session tokens, competitor product names in metadata) that
+  // Cascade's safety filter treats as policy violations even though
+  // the actual user prompt is benign.
+  let text = sysText;
+  // Codex session tokens containing "devin" trigger Windsurf's filter
+  text = text.replace(/devin[_-]?(?:session|sess|id|token|key|auth)/gi, 'cloud-session');
+  // Devin-related internal metadata (brand names in tool output headers)
+  text = text.replace(/(?:^|\n)\s*(?:#\s*)?Devin\s+(?:AI|Assistant|Agent|IDE|CLI|Code)/gi, '\nCloud IDE');
+  // Generic: strip "You are Devin/OpenClaw/etc" identity overrides
+  text = text.replace(/(^|[\n.!?]\s*)You are (?:Devin|Codex|OpenClaw|Aider|Cline)(?:[,.]|\s|$)/gi, '$1The assistant is a coding tool');
+  return text.replace(/(^|[\n.!?]\s*)You are /g, '$1The assistant is ');
 }
 
 function extractCompactSystemFacts(sysText) {
@@ -156,7 +169,10 @@ function positiveIntEnv(name, fallback) {
 }
 
 function cascadeHistoryBudget(modelUid) {
-  const normal = positiveIntEnv('CASCADE_MAX_HISTORY_BYTES', 200_000);
+  // Default 400KB — long conversations (100+ turns with tool results)
+  // easily hit the old 200KB limit, causing silent context amputation.
+  // Still configurable via env for memory-constrained hosts.
+  const normal = positiveIntEnv('CASCADE_MAX_HISTORY_BYTES', 400_000);
   if (/\b1m\b|[-_]1m$/i.test(String(modelUid || ''))) {
     return positiveIntEnv('CASCADE_1M_HISTORY_BYTES', 900_000);
   }
@@ -165,15 +181,42 @@ function cascadeHistoryBudget(modelUid) {
 
 const CASCADE_TIMEOUTS = {
   // Absolute upper bound. The real "is the cascade alive" gate is
-  // warmStallMs (25s of no progress → exit). 180s used to be the cap and
+  // warmStallMs (45s of no progress → exit). 180s used to be the cap and
   // bit slow-streaming long outputs (issue #59 4.6 hit this at 15349
   // chars/180s = ~85 chars/s) — Claude Code then kicked off an awkward
   // continuation request. 600s gives long outputs room to finish; the
-  // warm stall still exits stuck cascades within 25s of true silence.
+  // warm stall still exits stuck cascades.
   maxWaitMs:        positiveIntEnv('CASCADE_MAX_WAIT_MS', 600_000),
   pollIntervalMs:   positiveIntEnv('CASCADE_POLL_INTERVAL_MS', 500),
   coldStallBaseMs:  positiveIntEnv('CASCADE_COLD_STALL_BASE_MS', 30_000),
-  warmStallMs:      positiveIntEnv('CASCADE_WARM_STALL_MS', 25_000),
+  // v2.0.74 (#122 zhangzhang-bit): bumped 25s → 45s. zhangzhang reported
+  // a real-world cascade that finishes around 30s consistently getting
+  // killed at 25s and looping forever. 25s was tuned for a flat
+  // single-shot text reply; modern Claude Code workflows go silent for
+  // 30-40s mid-tool-execution while the cascade waits on a slow shell
+  // command (curl / git clone / npm install). 45s gives those room
+  // without giving stuck cascades free time — the cold stall (30s with
+  // ZERO output) still bails fast.
+  warmStallMs:      positiveIntEnv('CASCADE_WARM_STALL_MS', 45_000),
+  // v2.0.69 (#57 123cek follow-up): thinking-mode requests sometimes
+  // pause emission for >25s mid-reasoning even though the planner is
+  // actively working — Claude 4.5/4.6/4.7 -thinking variants do this on
+  // hard math / multi-file analysis. Old behaviour killed those
+  // cascades at 25s of silence, surfacing as "思考 200 多秒之后会中断".
+  // Once we've seen ANY thinking emission this turn, fall back to a
+  // longer ceiling (default 120s) so deep-think windows survive natural
+  // pauses. Text-mode requests (no thinking) keep the strict 45s.
+  warmStallThinkingMs: positiveIntEnv('CASCADE_WARM_STALL_THINKING_MS', 120_000),
+  // v2.0.74 (#122) — third tier for "we already emitted a tool call,
+  // now we're waiting on the IDE tool to finish executing". Cascade
+  // built-in tools (run_command pulling a repo, view_file on a huge
+  // file, propose_code thinking through a refactor) can legitimately
+  // sit at the same step status for 60-150s. Keep this >warmStallMs
+  // and >coldStallMs so the tool-active path always wins when both
+  // apply. Engaged once toolCallCount > 0 — that means the model
+  // already decided what to do and the LS is now executing on its
+  // behalf, so silence isn't a stall.
+  warmStallToolActiveMs: positiveIntEnv('CASCADE_WARM_STALL_TOOL_ACTIVE_MS', 180_000),
   idleGraceMs:      positiveIntEnv('CASCADE_IDLE_GRACE_MS', 8_000),
   stallRetryMinText: positiveIntEnv('CASCADE_STALL_RETRY_MIN_TEXT', 300),
 };
@@ -181,6 +224,39 @@ const CASCADE_TIMEOUTS = {
 export function shouldColdStall({ elapsed, coldStallMs, sawActive, sawText, totalThinking, toolCallCount }) {
   return elapsed > coldStallMs && sawActive && !sawText && (totalThinking || 0) === 0 && (toolCallCount || 0) === 0;
 }
+
+// v2.0.74 (#122). Three-tier ceiling picker for warm-stall detection.
+// Exported so the regression test can assert that:
+//   - tool-active beats thinking beats text-only
+//   - text-only baseline is the 45s value, not the historical 25s
+//   - env overrides flow through (CASCADE_WARM_STALL_*).
+// `timeouts` defaults to live CASCADE_TIMEOUTS so production callers
+// don't have to thread it; tests inject their own.
+//
+// v2.0.79 (audit M-2): the tool-active 180s ceiling previously stayed
+// engaged for the rest of the turn once any tool call was emitted.
+// That meant a 200ms `view_file` followed by silence cost 180s of
+// account quota before the stall triggered, even though the LS was
+// no longer doing anything. Now the 180s ceiling only applies while
+// progress is RECENT — if the trajectory has been silent for longer
+// than `toolActiveGraceMs` (default 60s) since the last tool/step/
+// text update, fall back to the thinking-tier ceiling so quota burn
+// is bounded. Caller passes `msSinceGrowth` (always available in
+// the warm-stall check site).
+export function pickWarmStallCeiling({ totalThinking = 0, toolCallCount = 0, msSinceGrowth = 0, hasActiveStep = null } = {}, timeouts = CASCADE_TIMEOUTS) {
+  const TOOL_ACTIVE_GRACE_MS = positiveIntEnv('CASCADE_TOOL_ACTIVE_GRACE_MS', 60_000);
+  const toolActive = (toolCallCount || 0) > 0;
+  // If the caller can tell us a step is currently ACTIVE (status=1),
+  // trust that signal — tool is genuinely running, full 180s applies.
+  // Otherwise fall back to the time-since-progress heuristic.
+  const inToolWindow = hasActiveStep === true
+    || (toolActive && (msSinceGrowth || 0) < TOOL_ACTIVE_GRACE_MS);
+  if (inToolWindow) return timeouts.warmStallToolActiveMs;
+  if ((totalThinking || 0) > 0) return timeouts.warmStallThinkingMs;
+  return timeouts.warmStallMs;
+}
+
+export const __TEST_CASCADE_TIMEOUTS = CASCADE_TIMEOUTS;
 
 // ── Fake workspace scaffold ────────────────────────────────
 // A real Windsurf IDE always has a workspace directory that the LS scans
@@ -191,25 +267,42 @@ export function shouldColdStall({ elapsed, coldStallMs, sawActive, sawText, tota
 // gap. The scaffold is created once per account and persists.
 const _seededWorkspaces = new Set();
 
+// Detects an old (pre-#108) scaffold that named the placeholder
+// "my-project" or carried a Hello-world src/index.js. On upgrade we
+// rewrite those files in place so the next cascade init re-snapshots
+// the labeled-as-stub version into <workspace_layout>.
+function isLegacyScaffold(workspacePath) {
+  try {
+    const pkgPath = `${workspacePath}/package.json`;
+    if (!existsSync(pkgPath)) return false;
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+    return pkg?.name !== 'proxy-workspace-stub';
+  } catch {
+    return false;
+  }
+}
+
 function ensureWorkspaceDir(workspacePath) {
   if (_seededWorkspaces.has(workspacePath)) return;
   try {
-    if (!existsSync(workspacePath)) {
+    const exists = existsSync(workspacePath);
+    if (exists && isLegacyScaffold(workspacePath)) {
+      // Rewrite stub files but leave any other content alone — operator
+      // may have manually placed files in this dir for some reason.
+      try {
+        rmSync(`${workspacePath}/src`, { recursive: true, force: true });
+      } catch {}
+      writeStubFiles(workspacePath);
+      log.info(`Workspace scaffold migrated to #108 stub-labeled form: ${workspacePath}`);
+      _seededWorkspaces.add(workspacePath);
+      return;
+    }
+    if (!exists) {
       mkdirSync(workspacePath, { recursive: true });
-      // Seed a minimal project so the LS has something to index
-      writeFileSync(`${workspacePath}/package.json`, JSON.stringify({
-        name: 'my-project', version: '0.1.0', private: true,
-        description: 'A development project',
-        scripts: { start: 'node src/index.js', test: 'node --test' },
-        license: 'MIT',
-      }, null, 2) + '\n');
-      writeFileSync(`${workspacePath}/README.md`, '# My Project\n\nA development project.\n\n## Getting Started\n\n```bash\nnpm start\n```\n');
-      writeFileSync(`${workspacePath}/.gitignore`, 'node_modules/\n.env\ndist/\n*.log\n');
-      mkdirSync(`${workspacePath}/src`, { recursive: true });
-      writeFileSync(`${workspacePath}/src/index.js`, '// Entry point\nconsole.log("Hello, world!");\n');
+      writeStubFiles(workspacePath);
       // Init git repo so LS picks up real git state
       try {
-        execSync('git init -q && git add -A && git commit -q -m "init" --allow-empty', {
+        execSync('git init -q && git add -A && git commit -q -m "proxy stub" --allow-empty', {
           cwd: workspacePath, stdio: 'ignore', timeout: 5000,
         });
       } catch {}
@@ -219,6 +312,27 @@ function ensureWorkspaceDir(workspacePath) {
   } catch (e) {
     log.debug(`ensureWorkspaceDir: ${e.message}`);
   }
+}
+
+// #108: prior scaffold seeded a `package.json` named "my-project" plus a
+// `src/index.js` and `README.md` "Getting Started" page. Cascade upstream
+// snapshots the workspace into the system prompt as `<workspace_layout>`;
+// the model then treats those stub files as the user's real project and
+// "analyzes" them when asked "analyze the project", reporting an empty
+// Node template the user has never seen. Keep the scaffold real enough
+// that the LS still indexes a workspace (closes the fingerprint gap)
+// but make every file unmistakably labeled as a proxy placeholder so
+// the model can't confuse it for the user's project.
+function writeStubFiles(workspacePath) {
+  writeFileSync(`${workspacePath}/package.json`, JSON.stringify({
+    name: 'proxy-workspace-stub',
+    version: '0.0.0',
+    private: true,
+    description: 'Empty placeholder created by the WindsurfAPI proxy. NOT the user project — the user\'s real workspace lives on the calling client and is described via the calling agent\'s Environment facts.',
+    license: 'UNLICENSED',
+  }, null, 2) + '\n');
+  writeFileSync(`${workspacePath}/README.md`, '# Proxy workspace placeholder\n\nThis directory exists only so the Windsurf language server has a workspace to register. It is NOT the user\'s project.\n\nThe user\'s real workspace lives on the calling client (their local IDE / CLI) and its path is communicated through the calling agent\'s Environment facts. To inspect actual files, use Read / Glob / Bash with paths from the Working directory in the Environment facts block.\n');
+  writeFileSync(`${workspacePath}/.gitignore`, '# proxy workspace placeholder — see README.md\n');
 }
 
 // ─── WindsurfClient ────────────────────────────────────────
@@ -326,7 +440,15 @@ export class WindsurfClient {
     if (lsEntry.workspaceInit) return lsEntry.workspaceInit;
 
     const sessionId = lsEntry.sessionId;
-    const wsId = this.apiKey.slice(0, 8).replace(/[^a-z0-9]/gi, 'x');
+    // v2.0.79 (audit L-2): previous derivation `apiKey.slice(0,8).replace(...)`
+    // had ≤40 bits of effective entropy and could collide for two
+    // accounts whose first 8 key chars differed only by symbols (both
+    // map to `xxxxxxxx`). Two colliding accounts would share a
+    // workspace dir, causing one's `package.json` to be read by the
+    // other and `ensureWorkspaceDir()` to skip re-init. Use a sha256
+    // prefix so collision space rises to 64 bits, well below the
+    // birthday bound for any realistic account count.
+    const wsId = createHash('sha256').update(this.apiKey || '').digest('hex').slice(0, 16);
     const workspacePath = `/home/user/projects/workspace-${wsId}`;
     const workspaceUri = `file://${workspacePath}`;
 
@@ -353,7 +475,17 @@ export class WindsurfClient {
         const trustProto = buildUpdateWorkspaceTrustRequest(this.apiKey, workspaceUri, true, sessionId);
         await grpcUnary(this.port, this.csrfToken,
           `${LS_SERVICE}/UpdateWorkspaceTrust`, grpcFrame(trustProto), 5000);
-      } catch (e) { handleWarmupError('UpdateWorkspaceTrust', e); }
+      } catch (e) {
+        // UpdateWorkspaceTrust failure is the silent killer behind #107's
+        // "untrusted workspace" symptom — if this stage no-ops, the next
+        // SendUserCascadeMessage will reject with `untrusted workspace`
+        // and the user has no clue why. Log at error level (the other
+        // stages stay at warn) so it surfaces in dashboards, then continue
+        // — the per-Send retry path now also recognizes "untrusted
+        // workspace" and force-rewarms, so we still recover.
+        if (isCascadeTransportError(e)) { handleWarmupError('UpdateWorkspaceTrust', e); }
+        else { log.error(`UpdateWorkspaceTrust failed silently on port=${this.port} — SendUserCascadeMessage will likely return 'untrusted workspace' until the next force re-warm: ${e.message}`); }
+      }
       try {
         const heartbeatProto = buildHeartbeatRequest(this.apiKey, sessionId);
         await grpcUnary(this.port, this.csrfToken,
@@ -382,7 +514,15 @@ export class WindsurfClient {
    * @param {object} opts - { onChunk, onEnd, onError }
    */
   async cascadeChat(messages, modelEnum, modelUid, opts = {}) {
-    let { onChunk, onEnd, onError, signal, reuseEntry, toolPreamble, displayModel } = opts;
+    let {
+      onChunk, onEnd, onError, signal, reuseEntry, toolPreamble, displayModel,
+      // v2.0.65 native tool bridge handles. When nativeMode=true the
+      // upstream cascade_config switches the planner to DEFAULT mode + a
+      // restricted CascadeToolConfig.tool_allowlist; additionalSteps[9]
+      // carries fake "completed" trajectory steps for the caller's prior
+      // tool turns so the planner reasons from post-tool state.
+      nativeMode, nativeAllowlist, additionalSteps,
+    } = opts;
     const aborted = () => signal?.aborted;
     const inputChars = messages.reduce((n, m) => n + contentToString(m?.content).length, 0);
 
@@ -403,6 +543,13 @@ export class WindsurfClient {
     // panel-missing — discard the reuse entry and fresh-start with full
     // history replay.
     const isExpiredCascade = (e) => /not_found.*(cascade|trajectory)|(?:cascade|trajectory).*not[ _-]?found|expired.*cascade|unknown.*cascade/i.test(e?.message || '');
+    // #107 follow-up (zhangzhang-bit): SendUserCascadeMessage occasionally
+    // returns "untrusted workspace" on a freshly-spun LS — UpdateWorkspaceTrust
+    // either silently failed during warmup (handleWarmupError swallows
+    // non-transport errors) or the trust state was reset between warmup
+    // and the first message. Same recovery: force re-warm (which retries
+    // UpdateWorkspaceTrust) and reopen the cascade.
+    const isUntrustedWorkspace = (e) => /untrusted workspace|workspace.*not.*trusted/i.test(e?.message || '');
 
     try {
       // Step 1: Start cascade — with retry on panel-state-not-found
@@ -536,6 +683,9 @@ export class WindsurfClient {
         const latest = convo[convo.length - 1];
         const extracted = await extractImages(latest?.content ?? '');
         text = `The following is a multi-turn conversation. You MUST remember and use all information from prior turns.\n\n${lines.join('\n\n')}\n\n<human>\n${extracted.text}\n</human>`;
+        if (firstIncluded > 0) {
+          text = `<truncation_note>The conversation above is truncated — ${firstIncluded} earlier turns were dropped due to length limits. The user's original task and the most recent tool results are preserved. Do NOT ask the user to repeat their task; continue from the latest context.</truncation_note>\n\n` + text;
+        }
         images = extracted.images;
         if (sysText) text = sysText + '\n\n' + text;
       }
@@ -549,7 +699,12 @@ export class WindsurfClient {
       // (fresh sessionId + panel init) + fresh StartCascade, with a
       // small backoff to let the LS settle.
       const sendMessage = async () => {
-        const sendProto = buildSendCascadeMessageRequest(this.apiKey, cascadeId, text, modelEnum, modelUid, sessionId, { toolPreamble, images });
+        const sendProto = buildSendCascadeMessageRequest(this.apiKey, cascadeId, text, modelEnum, modelUid, sessionId, {
+          toolPreamble, images,
+          nativeMode: !!nativeMode,
+          nativeAllowlist: nativeAllowlist || null,
+          additionalSteps: additionalSteps || null,
+        });
         await grpcUnary(
           this.port, this.csrfToken, `${LS_SERVICE}/SendUserCascadeMessage`, grpcFrame(sendProto)
         );
@@ -583,10 +738,15 @@ export class WindsurfClient {
           break;
         } catch (e) {
           const expired = isExpiredCascade(e);
-          if (!isPanelMissing(e) && !expired) throw e;
+          const untrusted = isUntrustedWorkspace(e);
+          if (!isPanelMissing(e) && !expired && !untrusted) throw e;
           panelRetry++;
           if (panelRetry > MAX_PANEL_RETRIES) {
-            const detail = cascadeExpiredOnce ? 'cascade expired and could not be re-established' : `Panel state lost ${panelRetry - 1} times after re-warm`;
+            const detail = cascadeExpiredOnce
+              ? 'cascade expired and could not be re-established'
+              : untrusted
+                ? `untrusted workspace persisted across ${panelRetry - 1} re-warm attempts (LS UpdateWorkspaceTrust may be failing silently)`
+                : `Panel state lost ${panelRetry - 1} times after re-warm`;
             const err = new Error(`${detail} — likely an LS-level issue with very large payloads (${text.length} chars). Try reducing system prompt size or tool count.`);
             // Tell the handler the entry we held is dead so it doesn't
             // restore it to the pool on the way out (HIGH-2).
@@ -596,6 +756,8 @@ export class WindsurfClient {
           if (expired) {
             cascadeExpiredOnce = true;
             log.warn(`Cascade expired/not-found on Send (retry ${panelRetry}/${MAX_PANEL_RETRIES}), discarding reuse entry, replaying full history on port=${this.port}: ${e.message}`);
+          } else if (untrusted) {
+            log.warn(`Untrusted workspace on Send (retry ${panelRetry}/${MAX_PANEL_RETRIES}), forcing UpdateWorkspaceTrust re-warm on port=${this.port}: ${e.message}`);
           } else {
             log.warn(`Panel state missing on Send (retry ${panelRetry}/${MAX_PANEL_RETRIES}), payload=${text.length} chars, re-warming port=${this.port}`);
           }
@@ -741,6 +903,14 @@ export class WindsurfClient {
           // polls only emits once. A tool call with an existing `result`
           // means the LS already executed it (built-in Cascade tool); we
           // pass it through to the client for visibility.
+          //
+          // v2.0.70: cascade_native tool calls now also stream via
+          // onChunk so the OpenAI client sees them as tool_call deltas
+          // mid-stream rather than batched at completion. We pass an
+          // explicit `toolCall` chunk shape (not `text`) — chat.js
+          // recognises it and emits the right `tool_calls: [...]`
+          // delta. Emit even when only seenToolCallIds fires so
+          // clients can show "running shell_command..." live.
           if (step.toolCalls && step.toolCalls.length) {
             for (const tc of step.toolCalls) {
               const key = tc.id || `${tc.name}:${tc.argumentsJson}`;
@@ -748,6 +918,14 @@ export class WindsurfClient {
               seenToolCallIds.add(key);
               toolCalls.push(tc);
               lastGrowthAt = Date.now();
+              // Only stream cascade_native to the client (the legacy
+              // ChatToolCall variants are dropped in chat.js anyway —
+              // see "Built-in Cascade tool calls ... DROPPED" comment).
+              if (tc.cascade_native) {
+                const chunk = { text: '', thinking: '', isError: false, nativeToolCall: tc };
+                chunks.push(chunk);
+                onChunk?.(chunk);
+              }
             }
           }
 
@@ -797,14 +975,40 @@ export class WindsurfClient {
           }
         }
 
-        // Warm stall: text stopped growing for 25s while planner is active.
+        // Warm stall: text stopped growing while planner is active.
         // Placed AFTER the step loop so lastGrowthAt is current-poll fresh.
-        if (sawText && lastStatus !== 1 && (Date.now() - lastGrowthAt) > NO_GROWTH_STALL_MS) {
-          const diag = { msSinceGrowth: Date.now() - lastGrowthAt, textLen: totalYielded, thinkingLen: totalThinking, stepCount: yieldedByStep.size, toolCalls: seenToolCallIds.size, lastStatus };
+        // Three tiers, biggest wins:
+        //   - tool-active (180s default) — model already emitted at
+        //     least one tool_call; the LS is now executing it (curl,
+        //     git clone, viewing a 5MB file) and trajectory is silent
+        //     by design until the tool finishes. Killing here causes
+        //     the loop zhangzhang-bit reported in #122 (v2.0.70 25s
+        //     cut, 30s would have succeeded).
+        //   - thinking (120s default) — v2.0.69 #57 fix. Reasoning
+        //     models go silent for 30-90s mid-think on hard problems.
+        //   - text-only (45s default, was 25s pre-v2.0.74) — short
+        //     ceiling for the bare turn case where neither thinking
+        //     nor tool calls fired.
+        // v2.0.79 (audit M-2): pass msSinceGrowth + hasActiveStep so
+        // the 180s tool-active ceiling only applies when the LS still
+        // has work to do. Once the trajectory has been silent past
+        // the grace window AND no step is ACTIVE, fall back to a
+        // shorter ceiling so a stuck cascade with a completed tool
+        // doesn't burn 180s of account quota per attempt.
+        const msSinceGrowth = Date.now() - lastGrowthAt;
+        const hasActiveStep = Array.isArray(steps) && steps.some((s) => s && s.status === 1);
+        const effectiveWarmStallMs = pickWarmStallCeiling({
+          totalThinking,
+          toolCallCount: seenToolCallIds.size,
+          msSinceGrowth,
+          hasActiveStep,
+        });
+        if (sawText && lastStatus !== 1 && msSinceGrowth > effectiveWarmStallMs) {
+          const diag = { msSinceGrowth, textLen: totalYielded, thinkingLen: totalThinking, stepCount: yieldedByStep.size, toolCalls: seenToolCallIds.size, lastStatus, ceilingMs: effectiveWarmStallMs, hasActiveStep };
           if (totalYielded < STALL_RETRY_MIN_TEXT) {
             log.warn('Cascade warm stall (short, retrying on next account)', diag);
             endReason = 'stall_warm_retry';
-            const err = new Error('Cascade planner stalled after preamble — no progress for 25s');
+            const err = new Error(`Cascade planner stalled after preamble — no progress for ${Math.round(effectiveWarmStallMs / 1000)}s`);
             err.isModelError = true;
             err.kind = 'transient_stall';
             throw err;
@@ -1002,45 +1206,16 @@ export class WindsurfClient {
     }
   }
 
-  // ─── Register user (JSON REST, unchanged) ────────────────
+  // ─── Register user (Connect-RPC primary, legacy REST fallback) ─────
 
   async registerUser(firebaseToken) {
-    return new Promise((resolve, reject) => {
-      const postData = JSON.stringify({ firebase_id_token: firebaseToken });
-      const req = https.request({
-        hostname: 'api.codeium.com',
-        port: 443,
-        path: '/register_user/',
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(postData),
-        },
-      }, (res) => {
-        let raw = '';
-        res.on('data', d => raw += d);
-        res.on('end', () => {
-          try {
-            const json = JSON.parse(raw);
-            if (res.statusCode >= 400) {
-              reject(new Error(`RegisterUser failed (${res.statusCode}): ${raw}`));
-              return;
-            }
-            if (!json.api_key) {
-              reject(new Error(`RegisterUser response missing api_key: ${raw}`));
-              return;
-            }
-            resolve({ apiKey: json.api_key, name: json.name, apiServerUrl: json.api_server_url });
-          } catch {
-            reject(new Error(`RegisterUser parse error: ${raw}`));
-          }
-        });
-        res.on('error', reject);
-      });
-      req.on('error', reject);
-      req.write(postData);
-      req.end();
-    });
+    // v2.0.57: Windsurf migrated RegisterUser to register.windsurf.com via
+    // Connect-RPC. We try the new path first and fall back to the legacy
+    // api.codeium.com/register_user/ endpoint if the new host is unhealthy.
+    // Centralised in windsurf-api.js so client.js / get-token.js /
+    // dashboard/windsurf-login.js all share the same dual-path logic.
+    const { registerWithFirebaseToken } = await import('./windsurf-api.js');
+    return registerWithFirebaseToken(firebaseToken);
   }
 
   // ── GetUserStatus ────────────────────────────────────────
