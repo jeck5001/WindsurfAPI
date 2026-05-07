@@ -2,8 +2,11 @@
  * HTTP/2 client for the local Windsurf language server binary.
  * Supports both gRPC and Connect-RPC protocols.
  *
- * GRPC_PROTOCOL=connect (default) — matches real Windsurf client fingerprint.
- * GRPC_PROTOCOL=grpc — legacy mode, original gRPC framing.
+ * Default: legacy gRPC framing (verified working with LS 2.12.5 against
+ * production cascade flow). Set GRPC_PROTOCOL=connect to opt in to Connect
+ * framing — note: as of v2.0.20, Connect default returned empty cascade_id
+ * from StartCascade against the production LS, so we keep legacy as default
+ * until the Connect response parser is debugged. Tracked for v2.0.22+.
  */
 
 import http2 from 'http2';
@@ -11,6 +14,7 @@ import { log } from './config.js';
 import { wrapRequest, StreamingFrameParser } from './connect.js';
 
 const USE_CONNECT = process.env.GRPC_PROTOCOL === 'connect';
+export const _USE_CONNECT_FOR_TEST = USE_CONNECT;
 
 // ─── HTTP/2 session pool ───────────────────────────────────
 //
@@ -175,9 +179,16 @@ export function grpcUnary(port, csrfToken, path, body, timeout = 30000) {
       const full = Buffer.concat(chunks);
 
       if (USE_CONNECT) {
-        const parser = new StreamingFrameParser();
-        parser.push(full);
-        const parsed = parser.drain();
+        let parsed;
+        try {
+          const parser = new StreamingFrameParser();
+          parser.push(full);
+          parsed = parser.drain();
+        } catch (err) {
+          try { req.close?.(http2.constants.NGHTTP2_CANCEL); } catch {}
+          done(reject, err);
+          return;
+        }
         const dataFrames = parsed.filter(f => !f.isEndStream);
         const trailer = parsed.find(f => f.isEndStream);
         if (trailer) {
@@ -259,20 +270,29 @@ export function grpcStream(port, csrfToken, path, body, opts = {}) {
     if (settled) return;
 
     if (USE_CONNECT) {
-      connectParser.push(chunk);
-      for (const frame of connectParser.drain()) {
-        if (frame.isEndStream) {
-          try {
-            const t = JSON.parse(frame.payload.toString());
-            if (t.error) {
-              settled = true; clearTimeout(timer);
-              onError?.(new Error(t.error.message || 'connect stream error'));
-              return;
-            }
-          } catch {}
-        } else {
-          onData?.(frame.payload);
+      try {
+        connectParser.push(chunk);
+        for (const frame of connectParser.drain()) {
+          if (frame.isEndStream) {
+            try {
+              const t = JSON.parse(frame.payload.toString());
+              if (t.error) {
+                settled = true;
+                clearTimeout(timer);
+                try { req.close?.(http2.constants.NGHTTP2_CANCEL); } catch {}
+                onError?.(new Error(t.error.message || 'connect stream error'));
+                return;
+              }
+            } catch {}
+          } else {
+            onData?.(frame.payload);
+          }
         }
+      } catch (err) {
+        settled = true;
+        clearTimeout(timer);
+        try { req.close?.(http2.constants.NGHTTP2_CANCEL); } catch {}
+        onError?.(err);
       }
       return;
     }

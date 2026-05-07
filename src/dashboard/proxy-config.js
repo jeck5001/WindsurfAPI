@@ -3,7 +3,8 @@
  * Supports per-account and global HTTP proxy settings.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { writeJsonAtomic } from '../fs-atomic.js';
 import { join } from 'path';
 import { config, log } from '../config.js';
 
@@ -25,7 +26,7 @@ try {
 
 function save() {
   try {
-    writeFileSync(PROXY_FILE, JSON.stringify(_config, null, 2));
+    writeJsonAtomic(PROXY_FILE, _config);
   } catch (e) {
     log.error('Failed to save proxy.json:', e.message);
   }
@@ -67,7 +68,7 @@ export function getProxyConfigMasked() {
 export function setGlobalProxy(cfg) {
   _config.global = cfg && cfg.host ? {
     type: cfg.type || 'http',
-    host: cfg.host,
+    host: String(cfg.host).trim(),
     port: parseInt(cfg.port, 10) || 8080,
     username: cfg.username || '',
     password: mergePassword(cfg, _config.global),
@@ -79,7 +80,7 @@ export function setAccountProxy(accountId, cfg) {
   if (cfg && cfg.host) {
     _config.perAccount[accountId] = {
       type: cfg.type || 'http',
-      host: cfg.host,
+      host: String(cfg.host).trim(),
       port: parseInt(cfg.port, 10) || 8080,
       username: cfg.username || '',
       password: mergePassword(cfg, _config.perAccount[accountId]),

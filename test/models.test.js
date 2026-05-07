@@ -21,6 +21,22 @@ describe('resolveModel', () => {
     assert.equal(result, 'claude-opus-4.6');
   });
 
+  // Issue #68 — bare `claude-4.6` (no sonnet/opus split) used to fall through
+  // to silent legacy fallback; the model would self-identify as "Claude 4.5"
+  // because no model name was forwarded upstream. Default to sonnet.
+  it('resolves bare claude-4.6 to sonnet variant', () => {
+    assert.equal(resolveModel('claude-4.6'), 'claude-sonnet-4.6');
+    assert.equal(resolveModel('claude-4.6-thinking'), 'claude-sonnet-4.6-thinking');
+    assert.equal(resolveModel('claude-4.6-1m'), 'claude-sonnet-4.6-1m');
+    assert.equal(resolveModel('claude-4.6-thinking-1m'), 'claude-sonnet-4.6-thinking-1m');
+  });
+
+  it('bare claude-4.6 resolves to a real catalog entry (not silent fallback)', () => {
+    const info = getModelInfo(resolveModel('claude-4.6'));
+    assert.ok(info, 'claude-4.6 must map to a known model');
+    assert.equal(info.modelUid, 'claude-sonnet-4-6');
+  });
+
   it('returns input unchanged for unknown models', () => {
     assert.equal(resolveModel('nonexistent-model-xyz'), 'nonexistent-model-xyz');
   });
@@ -28,6 +44,40 @@ describe('resolveModel', () => {
   it('returns null for null/empty input', () => {
     assert.equal(resolveModel(null), null);
     assert.equal(resolveModel(''), null);
+  });
+});
+
+describe('resolveModel Opus 4.7 / legacy alias coverage', () => {
+  it('resolves Opus 4.7 aliases to canonical catalog keys', () => {
+    assert.equal(resolveModel('claude-opus-4.7'), 'claude-opus-4-7-medium');
+    assert.equal(resolveModel('claude-opus-4.7-thinking'), 'claude-opus-4-7-medium-thinking');
+    assert.equal(resolveModel('claude-opus-4.7-high-thinking'), 'claude-opus-4-7-high-thinking');
+    assert.equal(resolveModel('claude-Opus-4.7'), 'claude-opus-4-7-medium');
+    assert.equal(resolveModel('CLAUDE-OPUS-4.7'), 'claude-opus-4-7-medium');
+    assert.equal(resolveModel('claude.opus.4.7'), 'claude.opus.4.7');
+  });
+
+  it('documents unsupported bare / separator variants explicitly', () => {
+    // Underscores aren't a recognized separator
+    assert.equal(resolveModel('claude_opus_4_7'), 'claude_opus_4_7');
+    // Bare `opus-4.7-xhigh` (no `claude-` prefix on a tier-suffix variant) — not aliased
+    assert.equal(resolveModel('opus-4.7-xhigh'), 'opus-4.7-xhigh');
+    // Too bare to disambiguate (sonnet vs opus)
+    assert.equal(resolveModel('4.7-medium'), '4.7-medium');
+    // Note: `opus-4.7-thinking` IS now supported (added by spark-C audit alongside `o4.7`).
+    // See test/models-catalog-correctness.test.js for the positive assertion.
+  });
+});
+
+describe('reverse-lookup model info coverage', () => {
+  it('resolves kimi-k2-thinking, glm-4.7-fast, and adaptive', () => {
+    const modelKeys = ['kimi-k2-thinking', 'glm-4.7-fast', 'adaptive'];
+    for (const raw of modelKeys) {
+      const resolved = resolveModel(raw);
+      const info = getModelInfo(resolved);
+      assert.ok(info, `missing model info for ${raw}`);
+      assert.equal(info.name, resolved, `info.name mismatch for ${raw}`);
+    }
   });
 });
 
@@ -70,4 +120,30 @@ describe('MODEL_TIER_ACCESS', () => {
   it('expired tier is empty', () => {
     assert.deepEqual(MODEL_TIER_ACCESS.expired, []);
   });
+});
+
+describe('deprecated model markers', () => {
+  // Models the Windsurf upstream removed from Cascade. Requests for them
+  // come back as "neither PlanModel nor RequestedModel specified" — we
+  // catch that in handlers/chat.js with a 410 model_deprecated response.
+  // If any of these loses its deprecated flag without the actual upstream
+  // coming back, users will get the cryptic 502 again and reopen #8.
+  const KNOWN_DEPRECATED = [
+    'gpt-4o-mini', 'gpt-4.1-mini', 'gpt-4.1-nano', 'gpt-5-mini',
+    'deepseek-v3', 'deepseek-v3-2', 'deepseek-r1',
+    'grok-3-mini', 'qwen-3',
+    // v2.0.51 #109 — verified broken in production:
+    //   3.5/3.7 Claude legacy: "neither PlanModel nor RequestedModel specified"
+    //   adaptive/arena-*: "unknown model UID ... model not found"
+    'claude-3.5-sonnet', 'claude-3.7-sonnet', 'claude-3.7-sonnet-thinking',
+    'adaptive', 'arena-fast', 'arena-smart',
+  ];
+
+  for (const key of KNOWN_DEPRECATED) {
+    it(`${key} is flagged deprecated`, () => {
+      const info = getModelInfo(key);
+      assert.ok(info, `${key} missing from MODELS`);
+      assert.equal(info.deprecated, true, `${key} lost its deprecated flag`);
+    });
+  }
 });

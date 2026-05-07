@@ -21,25 +21,30 @@ Turns [Windsurf](https://windsurf.com) (formerly Codeium)'s AI models into **two
 - `POST /v1/chat/completions` — **OpenAI Compatible** for any OpenAI SDK.
 - `POST /v1/messages` — **Anthropic Compatible** for direct connection with Claude Code / Cline / Cursor.
 
-**107 Models**: Claude Opus / Sonnet · GPT-5 series · Gemini 3.x · DeepSeek · Grok · Qwen · Kimi · GLM, etc. Zero npm dependencies, pure Node.js.
+**100+ Models**: Claude 4.5/4.6/Opus 4.7 · GPT-5/5.1/5.2/5.4 series · Gemini 2.5/3.0/3.1 · Grok · Qwen · Kimi K2.x · GLM 4.7/5/5.1 · MiniMax · SWE 1.5/1.6 · Arena, etc. Zero npm dependencies, pure Node.js.
 
 ## What is it doing?
 
-```
-     ┌─────────────┐   /v1/chat/completions   ┌────────────┐
-     │ OpenAI SDK  │ ──────────────────────→  │            │
-     │ curl / Frontend │ ←──────────────────────  │            │
-     └─────────────┘   OpenAI JSON + SSE      │ WindsurfAPI│
-                                              │ Node.js    │      ┌──────────────┐       ┌─────────────────┐
-     ┌─────────────┐   /v1/messages           │ (This Service)   │ gRPC │ Language     │ HTTPS │ Windsurf Cloud  │
-     │ Claude Code │ ──────────────────────→  │            │ ───→ │ Server (LS)  │ ────→ │ server.self-    │
-     │ Cline       │ ←──────────────────────  │            │ ←─── │ (Windsurf    │ ←─── │ serve.windsurf  │
-     │ Cursor      │   Anthropic SSE          │            │      │  binary)     │       │ .com            │
-     └─────────────┘                          └────────────┘      └──────────────┘       └─────────────────┘
-                                                    ↑
-                                           Account Pool Round-Robin
-                                            Rate Limit Isolation
-                                                   Failover
+```mermaid
+flowchart LR
+    subgraph Clients
+        A[OpenAI SDK<br>curl / Frontend]
+        B[Claude Code<br>Cline<br>Cursor]
+    end
+
+    subgraph WindsurfAPI["WindsurfAPI (Node.js)"]
+        C[HTTP Service<br>Port 3003]
+        D[Account Pool<br>Round-Robin<br>Rate Limit<br>Failover]
+    end
+
+    E["Language Server<br>(Windsurf binary)"]
+    F[Windsurf Cloud<br>server.self-serve.windsurf.com]
+
+    A -->|"/v1/chat/completions"<br>OpenAI JSON + SSE| C
+    B -->|"/v1/messages"<br>Anthropic SSE| C
+    C <-->|gRPC| E
+    E <-->|HTTPS| F
+    D -.-> C
 ```
 
 **What it does**:
@@ -52,29 +57,26 @@ Turns [Windsurf](https://windsurf.com) (formerly Codeium)'s AI models into **two
 
 The model itself does **not** operate on files — file operations are executed locally by the IDE Agent client (Claude Code, Cline, etc.):
 
-```
- You "Help me fix a bug"         Claude Code                    WindsurfAPI               Windsurf Cloud
-   │                                │                               │                          │
-   │────────────────────────────→  │                               │                          │
-   │                                │  POST /v1/messages            │                          │
-   │                                │  messages + tools + system    │                          │
-   │                                │ ─────────────────────────────→│ Package into Cascade request │
-   │                                │                               │ ──────────────────────→  │
-   │                                │                               │                          │
-   │                                │                               │               Model thinks → returns
-   │                                │                               │               tool_use(edit_file)
-   │                                │                               │ ←──────────────────────  │
-   │                                │ ←── Anthropic SSE ────────────│                          │
-   │                                │   content_block=tool_use      │                          │
-   │                                │                               │                          │
-   │                                │ Execute edit_file() locally   │                          │
-   │                                │ (Read/write local files)      │                          │
-   │                                │                               │                          │
-   │                                │ Send another turn with tool_result │                          │
-   │                                │ ─────────────────────────────→│ ──────────────────────→  │
-   │                                │                                             ... (loop) ...
-   │                                │                               │                          │
-   │  ← Final answer                │                               │                          │
+```mermaid
+sequenceDiagram
+    actor U as You
+    participant CC as Claude Code
+    participant WA as WindsurfAPI
+    participant WC as Windsurf Cloud
+
+    U->>CC: "Help me fix a bug"
+    CC->>WA: POST /v1/messages<br>messages + tools + system
+    WA->>WC: Package into Cascade request
+    WC-->>WA: Model thinks → returns<br>tool_use(edit_file)
+    WA-->>CC: Anthropic SSE<br>content_block=tool_use
+    CC->>CC: Execute edit_file() locally<br>(Read/write local files)
+    CC->>WA: Send tool_result
+    WA->>WC: Continue conversation...
+    loop Conversation Loop
+        WC-->>WA: Response
+        WA-->>CC: SSE stream
+    end
+    CC-->>U: Final answer
 ```
 
 **Key Point**: WindsurfAPI is only responsible for **passing** `tool_use` / `tool_result`. The client CLI is what actually modifies the files.
@@ -200,13 +202,17 @@ bash install-ls.sh
 cat > .env << 'EOF'
 PORT=3003
 API_KEY=
-DEFAULT_MODEL=gpt-4o-mini
+DEFAULT_MODEL=claude-4.5-sonnet-thinking
 MAX_TOKENS=8192
 LOG_LEVEL=info
 LS_BINARY_PATH=/opt/windsurf/language_server_linux_x64
 LS_PORT=42100
 DASHBOARD_PASSWORD=
 EOF
+
+# Note: Inline comments are supported in .env for unquoted values:
+#   PORT=3003  # Service port
+# Quoted values preserve everything inside the quotes.
 
 node src/index.js
 ```
@@ -224,16 +230,16 @@ Open `http://YOUR_IP:3003/dashboard` → Login to get token → Click **Sign in 
 Go to [windsurf.com/show-auth-token](https://windsurf.com/show-auth-token) to copy your token:
 
 ```bash
-curl -X POST http://localhost:3003/auth/login 
-  -H "Content-Type: application/json" 
+curl -X POST http://localhost:3003/auth/login
+  -H "Content-Type: application/json"
   -d '{"token": "YOUR_TOKEN"}'
 ```
 
 **Method 3: Batch**
 
 ```bash
-curl -X POST http://localhost:3003/auth/login 
-  -H "Content-Type: application/json" 
+curl -X POST http://localhost:3003/auth/login
+  -H "Content-Type: application/json"
   -d '{"accounts": [{"token": "t1"}, {"token": "t2"}]}'
 ```
 
@@ -261,9 +267,9 @@ claude                # Use Claude Code as usual
 
 ```bash
 # Raw curl test
-curl http://localhost:3003/v1/messages 
-  -H "Authorization: Bearer YOUR_KEY" 
-  -H "anthropic-version: 2023-06-01" 
+curl http://localhost:3003/v1/messages
+  -H "Authorization: Bearer YOUR_KEY"
+  -H "anthropic-version: 2023-06-01"
   -d '{"model":"claude-opus-4.6","max_tokens":100,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
@@ -293,12 +299,22 @@ In your client's settings for **Custom OpenAI Compatible**:
 | `PORT` | `3003` | Service port |
 | `API_KEY` | empty | API key required for requests. Leave empty to disable validation. |
 | `DATA_DIR` | project root | Directory for persisted JSON state and `logs/`. Docker deployments should usually use `/data`. |
+| `CODEIUM_API_KEY` | empty | Direct API key from Windsurf (alternative to token-based auth). |
+| `CODEIUM_AUTH_TOKEN` | empty | Token from [windsurf.com/show-auth-token](https://windsurf.com/show-auth-token). |
+| `CODEIUM_EMAIL` | empty | Email for Windsurf account authentication. |
+| `CODEIUM_PASSWORD` | empty | Password for Windsurf account authentication. |
+| `CODEIUM_API_URL` | `https://server.self-serve.windsurf.com` | Windsurf cloud API endpoint. |
 | `DEFAULT_MODEL` | `claude-4.5-sonnet-thinking` | The model to use if `model` is not specified. |
 | `MAX_TOKENS` | `8192` | Default maximum number of response tokens. |
 | `LOG_LEVEL` | `info` | debug / info / warn / error |
 | `LS_BINARY_PATH` | `/opt/windsurf/language_server_linux_x64` | Path to the LS binary. |
 | `LS_PORT` | `42100` | LS gRPC port. |
+| `LS_DATA_DIR` | `/opt/windsurf` | Per-proxy LS data directory root. |
 | `DASHBOARD_PASSWORD` | empty | Dashboard password. Leave empty for no password. |
+| `ALLOW_PRIVATE_PROXY_HOSTS` | empty | Set to `1` to allow private/internal IPs (e.g., `192.168.x.x`, `10.x.x.x`) in proxy tests and login. Leave empty to only allow public addresses (default). |
+| `CASCADE_REUSE_STRICT` | `0` | Set to `1` for strict conversation reuse mode (waits for same fingerprint). |
+| `CASCADE_REUSE_STRICT_RETRY_MS` | `60000` | Retry delay in ms for strict reuse mode. |
+| `CASCADE_REUSE_HASH_SYSTEM` | `0` | Set to `1` to include system messages in conversation reuse hash. |
 
 ## Dashboard Features
 
@@ -317,37 +333,50 @@ Open `http://YOUR_IP:3003/dashboard`:
 
 ## Supported Models
 
-A total of 107 models. The following are the main categories; the actual list is based on the `/v1/models` response:
+100+ static models in the main catalog plus dynamic cloud-side models added at startup via `mergeCloudModels`. Full list: `GET /v1/models`, or browse the [GitHub Pages model catalog](https://dwgx.github.io/WindsurfAPI/#models) (auto-generated from `src/models.js`).
 
 <details>
-<summary><b>Claude (Anthropic)</b> — 20 models</summary>
+<summary><b>Claude (Anthropic)</b> — 21 models</summary>
 
-claude-3.5-sonnet / 3.7-sonnet / thinking · claude-4-sonnet / opus / thinking · claude-4.1-opus · claude-4.5-haiku / sonnet / opus · claude-sonnet-4.6 (incl. 1m / thinking / thinking-1m) · claude-opus-4.6 / thinking
+claude-3.5-sonnet / 3.7-sonnet / thinking · claude-4-sonnet / opus / thinking · claude-4.1-opus · claude-4.5-haiku / sonnet / opus · claude-sonnet-4.6 (incl. 1m / thinking / thinking-1m) · claude-opus-4.6 / thinking · **claude-opus-4.7-medium**
 
 </details>
 
 <details>
-<summary><b>GPT (OpenAI)</b> — 55+ models</summary>
+<summary><b>GPT (OpenAI)</b> — 55 models</summary>
 
-gpt-4o · gpt-4o-mini · gpt-4.1 / mini / nano · gpt-5 / 5-medium / 5-high / 5-mini · gpt-5.1 series (incl. codex / fast) · gpt-5.2 series (none / low / medium / high / xhigh + fast + codex) · gpt-5.3-codex · gpt-5.4 / 5.4-mini · gpt-oss-120b · o3 / o3-mini / o3-high / o3-pro / o4-mini
+gpt-4o · gpt-4.1 · gpt-5 series (incl. medium / high / codex) · **gpt-5.1 series** (base / low / medium / high + fast + codex, all 6 variants) · **gpt-5.2 series** (none / low / medium / high / xhigh + fast + codex) · **gpt-5.4 series** (base / mini × low/medium/high/xhigh) · o3 series (base / mini / pro) · o4-mini
 
 </details>
 
 <details>
 <summary><b>Gemini (Google)</b> — 9 models</summary>
 
-gemini-2.5-pro / flash · gemini-3.0-pro / flash (incl. minimal / low / high) · gemini-3.1-pro (low / high)
+gemini-2.5-pro / flash · gemini-3.0-pro / flash (minimal / low / medium / high — 4 reasoning levels) · gemini-3.1-pro (low / high)
 
 </details>
 
 <details>
-<summary><b>Others</b></summary>
+<summary><b>Open source / Chinese providers</b></summary>
 
-deepseek-v3 / v3-2 / r1 · grok-3 / mini / mini-thinking / code-fast-1 · qwen-3 / 3-coder · kimi-k2 / k2.5 · glm-4.7 / 5 / 5.1 · minimax-m2.5 · swe-1.5 / 1.6 (incl. fast) · arena-fast / smart
+**Kimi**: kimi-k2 / k2.5 / k2-6 · **GLM**: glm-4.7 / 5 / 5.1 · **Qwen**: qwen-3 · **Grok**: grok-3 / grok-3-mini-thinking / grok-code-fast-1 · **MiniMax**: minimax-m2.5
 
 </details>
 
-> **Free accounts** can only use `gpt-4o-mini` and `gemini-2.5-flash`. Others require Windsurf Pro.
+<details>
+<summary><b>Windsurf in-house + Arena</b></summary>
+
+swe-1.5 / 1.5-fast / 1.6 / 1.6-fast · arena-fast · arena-smart
+
+</details>
+
+> **Free-account entitlements** typically include `gemini-2.5-flash`, `glm-4.7` / `glm-5` / `5.1`, `kimi-k2` / `k2.5` / `k2-6`, `qwen-3` and similar open-source models; Claude family, GPT family, and Opus / thinking variants require Pro. Each account's exact list shows up in the dashboard.
+>
+> **Tool-calling reliability (measured v2.0.82+):** Claude family is the most reliable (their training covered prompt-level tool protocols); GLM-4.7 / Kimi-K2.5 work for most cases via NLU fallback + optional retry-with-correction; GLM-5.1 is unreliable on the cascade backend (it often returns empty responses, no narration to recover from); GPT family is also limited because the cascade upstream doesn't carry `tools[]` schema. For Claude Code / Cline / Codex doing local tool calls, prefer `claude-haiku-4.5` or `claude-sonnet-4.6`.
+
+### Language-Following for CJK Users
+
+The service automatically detects Chinese, Japanese, or Korean characters in your messages and injects a language-following hint to ensure the model responds in the same language. This fixes the issue where Claude Code's large English system prompt would override the communication language.
 
 ## Architecture Highlights
 
@@ -397,7 +426,13 @@ A: This has been fixed. Cold stall detection is now adaptive to input length, wi
 A: Yes. `export ANTHROPIC_BASE_URL=http://YOUR_API` + `export ANTHROPIC_API_KEY=YOUR_KEY`. `/v1/messages` supports the full suite: system, tools, tool_use, tool_result, stream, and multi-turn, all tested and working.
 
 **Q: What models can free accounts use?**
-A: Only `gpt-4o-mini` and `gemini-2.5-flash`. All others require Pro.
+A: Mostly `gemini-2.5-flash`, `glm-4.7` / `5` / `5.1`, `kimi-k2` / `k2.5` / `k2-6`, `qwen-3` (open-source series). Claude family, GPT family, and Opus / Max / -thinking variants need Pro entitlement. The dashboard shows each account's entitled list, and `model_not_entitled` error responses include an `available_in_pool` field with the names you can switch to.
+
+**Q: Are tool calls reliable on free accounts?**
+A: Depends on the model. Claude family is rock-solid (also free-account-entitled when available). GLM-4.7 / Kimi-K2.5 work in most cases via NLU recovery + `WINDSURFAPI_NLU_RETRY=1` retry-with-correction. GLM-5.1 is unreliable on the cascade backend (frequent empty responses) — proxy can't fix this. GPT family is similarly limited by the cascade protocol layer not passing `tools[]` schema. **For Claude Code / Cline / Codex doing local file/shell ops prefer `claude-haiku-4.5` or `claude-sonnet-4.6`.**
+
+**Q: 31 trial accounts go unavailable after a few hundred calls**
+A: Likely the model is a weekly-quota variant — `claude-opus-4-7-max` / `gpt-5.5-xhigh` / `claude-sonnet-4-7-thinking` etc. cap at 5 calls per week per account, so 31 accounts × 5 ≈ 150 calls hit the wall fast. Switch to `claude-sonnet-4.6` / `claude-haiku-4.5` (daily quotas are much wider). Verify with `docker logs windsurfapi-windsurf-api-1 | grep rate_limit` — the per-account cooldown reason is in the log.
 
 ## Contributors
 
@@ -407,6 +442,13 @@ Huge thanks to the following folks who sent pull requests or systematically audi
   Fixed the Pro tier model-merge logic: the hardcoded table wasn't picking up dynamically-fetched cloud models, so Pro accounts couldn't see newly-released models in Cursor / Cherry Studio.
 - [@colin1112a](https://github.com/colin1112a) — [PR #13](https://github.com/dwgx/WindsurfAPI/pull/13)
   A single-shot audit that flagged 15 security / concurrency / resource bugs: XSS escaping, shell injection, OOM guards, auth route placement, gRPC double-callback, LS pool race, HTTP/2 frame size caps, and more. On top of this we later added a JS-level `escJsAttr`, coalesced concurrent `ensureLs` calls via `_pending`, released pooled sessions on LS exit, and fixed 6 more issues surfaced by a follow-up Antigravity audit.
+- [@baily-zhang](https://github.com/baily-zhang) — [PR #36](https://github.com/dwgx/WindsurfAPI/pull/36) + [PR #45](https://github.com/dwgx/WindsurfAPI/pull/45)
+  Core Cascade reuse fixes: stableTurns fingerprinting (#36) solved 0% hit rate; trajectory offset tracking (#45) eliminated context bloat during multi-turn reuse.
+- [@aict666](https://github.com/aict666) — [PR #44](https://github.com/dwgx/WindsurfAPI/pull/44)
+  Fixed inferTier demoting Pro/Trial accounts to free after every chat call, preserving the authoritative tier from GetUserStatus.
+- [@smeinecke](https://github.com/smeinecke) — [PR #43](https://github.com/dwgx/WindsurfAPI/pull/43)
+  Full Dashboard i18n: 14 commits covering Chinese/English translations, I18n system, and check-i18n.js validation tool.
+
 Want to be on this list? Open an [issue](https://github.com/dwgx/WindsurfAPI/issues) or a [pull request](https://github.com/dwgx/WindsurfAPI/pulls). The dashboard has a Credits panel on the left that shows the same info.
 
 ## License
