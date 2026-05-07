@@ -138,7 +138,7 @@ cp .env.ghcr.example .env
 
 如果你的 fork 默认分支不是 `master` 而是 `main`，把上面 URL 里的 `master` 改成 `main`。
 
-7. 编辑 `.env`，至少把 `IMAGE_NAME` 改成你自己的 GHCR 地址，比如 `ghcr.io/<你的 GitHub 用户名>/windsurf-api`。如果 NAS 上的持久化目录不是当前目录，也顺手改掉 `APP_DATA_DIR`、`WINDSURF_DIR`、`WORKSPACE_DIR`。这个 NAS 专用 compose 会直接把容器的 `3003` 端口映射出来，不再额外依赖本地 `nginx.conf`。
+7. 编辑 `.env`，至少把 `IMAGE_NAME` 改成你自己的 GHCR 地址，比如 `ghcr.io/<你的 GitHub 用户名>/windsurf-api`。如果 NAS 上的持久化目录不是当前目录，也顺手改掉 `APP_DATA_DIR`、`WINDSURF_DIR`、`WORKSPACE_DIR`。这个 NAS 专用 compose 会直接把容器的 `3003` 端口映射出来，不再额外依赖本地 `nginx.conf`。单实例 NAS 默认应保持 `REPLICA_ISOLATE=0`，否则容器重建后 `HOSTNAME` 变化会把账号数据写到新的子目录里，看起来像“账号丢失”。
 8. 启动服务：
 
 ```bash

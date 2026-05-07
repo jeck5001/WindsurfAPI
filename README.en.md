@@ -138,7 +138,7 @@ cp .env.ghcr.example .env
 
 If your fork uses `main` instead of `master` as the default branch, replace `master` with `main` in the URLs above.
 
-7. Edit `.env` and change `IMAGE_NAME` to your own GHCR path, for example `ghcr.io/<your GitHub username>/windsurf-api`. If your NAS stores persistent data elsewhere, also update `APP_DATA_DIR`, `WINDSURF_DIR`, and `WORKSPACE_DIR`. This NAS-specific compose file now publishes container port `3003` directly and no longer depends on a local `nginx.conf`.
+7. Edit `.env` and change `IMAGE_NAME` to your own GHCR path, for example `ghcr.io/<your GitHub username>/windsurf-api`. If your NAS stores persistent data elsewhere, also update `APP_DATA_DIR`, `WINDSURF_DIR`, and `WORKSPACE_DIR`. This NAS-specific compose file now publishes container port `3003` directly and no longer depends on a local `nginx.conf`. For a single-container NAS deployment, keep `REPLICA_ISOLATE=0`; otherwise a recreated container gets a new `HOSTNAME` and the account files move to a different subdirectory, which looks like lost accounts.
 8. Start the stack:
 
 ```bash
