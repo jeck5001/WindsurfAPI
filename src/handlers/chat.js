@@ -2246,10 +2246,16 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
           // args case (#125 DuZunTianXia) goes from 0 tool_calls to
           // a real protocol emit on the second pass.
           //
-          // Default OFF — burns 2x account quota when active. Operator
-          // opts in via WINDSURFAPI_NLU_RETRY=1.
+          // Default ON for GLM/Kimi (notoriously narrate instead of calling
+          // tools on first pass). Claude/GPT have good first-pass compliance
+          // so they only get retry when explicitly opted in. Set
+          // WINDSURFAPI_NLU_RETRY=0 to disable globally.
+          const nluRetryEnabled = process.env.WINDSURFAPI_NLU_RETRY !== '0'
+            && (process.env.WINDSURFAPI_NLU_RETRY === '1'
+                || /zhipu|glm|moonshot|kimi/i.test(String(provider || ''))
+                || /^(?:glm|kimi)/i.test(String(modelKey || '')));
           if (toolCalls.length === 0
-              && process.env.WINDSURFAPI_NLU_RETRY === '1'
+              && nluRetryEnabled
               && Array.isArray(tools) && tools.length > 0
               && narrativeSource) {
             const lastUser = latestRealUserText(messages) || '';
@@ -2431,6 +2437,22 @@ async function nonStreamResponse(client, id, created, model, modelKey, messages,
     // next identical original-model request misses cache and re-
     // triggers the rate_limit + fallback cycle, burning cascade
     // quota for the whole rate-limit window.
+    // v2.0.91 — kimi-k2 upstream outage. Cascade returns idle_empty
+    // (null content, ~1-6 tokens). Return clear error with alternatives.
+    if (/^kimi/i.test(String(modelKey || ''))
+        && !toolCalls.length
+        && (!allText || allText.trim().length === 0)
+        && (!allThinking || allThinking.trim().length === 0)) {
+      return {
+        status: 502,
+        body: {
+          error: {
+            message: `${model} 在 Cascade 上游当前不可用（返回空响应）。请换用 claude-sonnet-4.6、gemini-2.5-flash 或 glm-4.7。`,
+            type: 'upstream_model_unavailable',
+          },
+        },
+      };
+    }
     if (ckey && !toolCalls.length) {
       cacheSet(ckey, { text: allText, thinking: allThinking });
       if (aliasCkey && aliasCkey !== ckey) {

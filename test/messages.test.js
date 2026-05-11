@@ -325,7 +325,7 @@ describe('Anthropic messages request translation', () => {
     assert.equal(capturedContext.callerKey, 'api:abc123');
   });
 
-  it('drops Anthropic server-side tool types (advisor / web_search / code_execution) before forwarding', async () => {
+  it('drops unsupported Anthropic server-side tool types and bridges web_search before forwarding', async () => {
     let capturedBody = null;
     await handleMessages({
       model: 'claude-sonnet-4.6',
@@ -348,14 +348,15 @@ describe('Anthropic messages request translation', () => {
         };
       },
     });
-    // Only the client-side Read tool survives translation; all three
-    // server-side types must be stripped.
-    assert.equal(capturedBody.tools?.length, 1);
-    assert.equal(capturedBody.tools[0].function.name, 'Read');
+    // advisor / code_execution stay stripped; web_search_20250305 is
+    // bridged to a normal function tool named web_search.
+    assert.equal(capturedBody.tools?.length, 2);
     const names = capturedBody.tools.map(t => t.function.name);
-    for (const banned of ['advisor', 'web_search', 'code_execution']) {
+    for (const banned of ['advisor', 'code_execution']) {
       assert.equal(names.includes(banned), false, `${banned} should not be forwarded`);
     }
+    assert.equal(names.includes('Read'), true);
+    assert.equal(names.includes('web_search'), true);
   });
 
   it('omits tools entirely when the only declared tool is server-side', async () => {
